@@ -1,0 +1,11 @@
+[package]
+name = "slash0-shader"
+version = "0.1.0"
+edition = "2024"
+
+# Uncomment when rust-gpu is wired up (also add spirv-std to [dependencies]):
+# [lib]
+# crate-type = ["dylib", "rlib"]
+
+[dependencies]
+slash0-core = { path = "../core", default-features = false }

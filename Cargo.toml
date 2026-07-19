@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/server",
+    "crates/client",
+]
+exclude = [
+    "crates/shader",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+slash0-core = { path = "crates/core", default-features = false }

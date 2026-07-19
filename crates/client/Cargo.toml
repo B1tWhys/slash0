@@ -1,0 +1,10 @@
+[package]
+name = "slash0-client"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+slash0-core = { workspace = true, features = ["alloc", "serde"] }

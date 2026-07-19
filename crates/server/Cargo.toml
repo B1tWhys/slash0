@@ -1,0 +1,7 @@
+[package]
+name = "slash0-server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+slash0-core = { workspace = true, features = ["alloc", "thick", "serde"] }

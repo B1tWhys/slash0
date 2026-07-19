@@ -1,0 +1,27 @@
+repos:
+  - repo: https://github.com/B1tWhys/no-emoji
+    rev: "1.0"
+    hooks:
+      - id: no-emoji
+
+  - repo: local
+    hooks:
+      - id: rustfmt
+        name: rustfmt
+        entry: rustfmt --edition 2024
+        language: system
+        files: \.rs$
+
+      - id: clippy-workspace
+        name: cargo clippy (workspace)
+        entry: cargo clippy --workspace --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        files: ^(crates/(core|server|client)/.*\.rs|Cargo\.(toml|lock))$
+
+      - id: clippy-shader
+        name: cargo clippy (shader)
+        entry: cargo clippy --manifest-path crates/shader/Cargo.toml --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        files: ^crates/shader/.*\.(rs|toml)$
