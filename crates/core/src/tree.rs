@@ -71,11 +71,8 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                 }
                 let leaf_idx = self.alloc_announced_node(prefix, &incoming, ts);
                 self.slab.get_mut(current).children[bit] = Some(leaf_idx);
-                dirty(current);
                 dirty(leaf_idx);
-                path[path_len] = Some(current);
-                path_len += 1;
-                self.propagate_up(&path[..path_len], ts, dirty);
+                self.dirty_and_propagate(current, ts, &path[..path_len], dirty);
                 return leaf_idx;
             }
 
@@ -88,10 +85,18 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                     n.data.merge_ancestor(current_ts);
                     n.children[node_bit] = Some(current);
                 }
-                self.set_parent_slot(parent, Some(new_idx), dirty);
                 dirty(new_idx);
-                dirty(current);
-                self.propagate_up(&path[..path_len], ts, dirty);
+                // Handle the parent (pointer edit + possible ts advance) once.
+                // current itself is unchanged.
+                match parent {
+                    None => self.root = Some(new_idx),
+                    Some((parent_idx, slot)) => {
+                        self.slab.get_mut(parent_idx).children[slot] = Some(new_idx);
+                        debug_assert_eq!(path[path_len - 1], Some(parent_idx));
+                        path_len -= 1;
+                        self.dirty_and_propagate(parent_idx, ts, &path[..path_len], dirty);
+                    }
+                }
                 return new_idx;
             }
 
@@ -108,14 +113,19 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                 let split = self.slab.get_mut(split_idx);
                 split.children[leaf_bit] = Some(leaf_idx);
                 split.children[node_bit] = Some(current);
+                split.data.merge_ancestor(ts);
             }
-            self.set_parent_slot(parent, Some(split_idx), dirty);
             dirty(split_idx);
             dirty(leaf_idx);
-            dirty(current);
-            path[path_len] = Some(split_idx);
-            path_len += 1;
-            self.propagate_up(&path[..path_len], ts, dirty);
+            match parent {
+                None => self.root = Some(split_idx),
+                Some((parent_idx, slot)) => {
+                    self.slab.get_mut(parent_idx).children[slot] = Some(split_idx);
+                    debug_assert_eq!(path[path_len - 1], Some(parent_idx));
+                    path_len -= 1;
+                    self.dirty_and_propagate(parent_idx, ts, &path[..path_len], dirty);
+                }
+            }
             return leaf_idx;
         }
     }
@@ -223,6 +233,16 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         self.sweep_recursive(root, None, dirty);
     }
 
+    // Freed slots themselves are never dirtied: the GPU is kept away from
+    // them by dirtying the parent whose child pointer just cleared. There is
+    // one remaining source of wasted uploads under sweep: when a chain of N
+    // nested nodes all collapse in one pass, each intermediate is dirtied by
+    // its (freed) child's set_parent_slot call and then freed itself moments
+    // later. That's N-1 wasted PCIe writes for a depth-N collapse. Cheap to
+    // fix by buffering dirties inside sweep_tombstones and filtering out
+    // indices that were freed by the end of the pass; deferred because chain
+    // collapses are rare at frame-boundary cadence.
+
     fn sweep_recursive(
         &mut self,
         idx: NodeIdx,
@@ -293,6 +313,27 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
             }
         }
     }
+
+    /// Merge `ts` into `target`, dirty `target` unconditionally, and only
+    /// propagate further into `ancestors` (strictly above `target`) if
+    /// `target`'s timestamp actually advanced. Ensures `target` is emitted
+    /// exactly once even when its bytes changed for a non-timestamp reason
+    /// (e.g., a children-pointer edit).
+    fn dirty_and_propagate(
+        &mut self,
+        target: NodeIdx,
+        ts: Timestamp,
+        ancestors: &[Option<NodeIdx>],
+        dirty: &mut impl FnMut(NodeIdx),
+    ) {
+        let before = self.slab.get(target).data.timestamp();
+        self.slab.get_mut(target).data.merge_ancestor(ts);
+        let after = self.slab.get(target).data.timestamp();
+        dirty(target);
+        if after != before {
+            self.propagate_up(ancestors, ts, dirty);
+        }
+    }
 }
 
 #[cfg(all(test, feature = "alloc"))]
@@ -355,6 +396,8 @@ mod tests {
         let result = op(tree, &mut dirty);
         let after = snapshot_reachable(tree);
         let dirty_set: BTreeSet<NodeIdx> = dirty.iter().copied().collect();
+
+        // Direction 1: every actual change must be reported.
         for (idx, after_node) in &after {
             let changed = match before.get(idx) {
                 None => true,
@@ -370,6 +413,36 @@ mod tests {
                 after_node,
             );
         }
+
+        // Direction 2: every emission must correspond to an actual change.
+        // An emission is legitimate iff the slot's bytes differ pre vs post,
+        // or the slot was newly allocated, or the slot was freed. A
+        // wasteful emission (dirty for a live, unchanged slot) is a
+        // regression that costs a GPU upload of unchanged bytes.
+        for &idx in &dirty_set {
+            // (Some, None) freed, (None, Some) newly allocated, (None, None)
+            // allocated-and-freed in one mutation — all legitimate. Only
+            // (Some, Some) with identical bytes is wasteful.
+            if let (Some(b), Some(a)) = (before.get(&idx), after.get(&idx)) {
+                assert!(
+                    b != a,
+                    "slab index {} was dirtied but its bytes did not change \
+                     (before == after == {:?})",
+                    idx.get(),
+                    a,
+                );
+            }
+        }
+
+        // Direction 3: no duplicate emissions. Two dirties for the same slot
+        // cost two GPU uploads of identical bytes.
+        assert_eq!(
+            dirty.len(),
+            dirty_set.len(),
+            "duplicate dirty emissions ({:?})",
+            dirty,
+        );
+
         result
     }
 
