@@ -40,7 +40,7 @@ pub trait NodeData: Default {
 pub trait ThinNodeData: NodeData + Copy {}
 
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Node<D> {
     pub children: [Option<NodeIdx>; 2],
     pub prefix: Prefix,

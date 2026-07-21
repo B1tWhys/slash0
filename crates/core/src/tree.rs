@@ -300,6 +300,7 @@ mod tests {
     use super::*;
     use crate::slab::{SlabRead, VecSlab};
     use crate::thin::ThinData;
+    use alloc::collections::{BTreeMap, BTreeSet};
     use alloc::vec::Vec;
 
     type Tree = RadixTree<ThinData, VecSlab<Node<ThinData>>>;
@@ -308,60 +309,125 @@ mod tests {
         RadixTree::new(VecSlab::new())
     }
 
-    fn v4(a: u8, b: u8, c: u8, d: u8) -> [u32; 4] {
-        let word0 = ((a as u32) << 24) | ((b as u32) << 16) | ((c as u32) << 8) | (d as u32);
-        [word0, 0, 0, 0]
+    fn addr(dotted: &str) -> [u32; 4] {
+        let ip: core::net::Ipv4Addr = dotted.parse().expect("valid IPv4 dotted-decimal");
+        [u32::from_be_bytes(ip.octets()), 0, 0, 0]
     }
 
-    fn pfx(a: u8, b: u8, c: u8, d: u8, len: u32) -> Prefix {
-        Prefix::new(v4(a, b, c, d), len)
+    fn v4(cidr: &str) -> Prefix {
+        let (addr_str, len_str) = cidr.split_once('/').expect("CIDR notation like 10.0.0.0/8");
+        let bits = addr(addr_str);
+        let len: u32 = len_str.parse().expect("valid prefix length");
+        Prefix::new(bits, len)
+    }
+
+    /// Snapshot every node reachable from the root, keyed by slab index.
+    fn snapshot_reachable(tree: &Tree) -> BTreeMap<NodeIdx, Node<ThinData>> {
+        fn collect(tree: &Tree, idx: NodeIdx, out: &mut BTreeMap<NodeIdx, Node<ThinData>>) {
+            if out.contains_key(&idx) {
+                return;
+            }
+            let node = *tree.slab.get(idx);
+            out.insert(idx, node);
+            for child in node.children.iter().flatten() {
+                collect(tree, *child, out);
+            }
+        }
+        let mut out = BTreeMap::new();
+        if let Some(root) = tree.root() {
+            collect(tree, root, &mut out);
+        }
+        out
+    }
+
+    /// Runs a tree mutation and asserts that every reachable slab entry whose
+    /// bytes changed (or that appeared new) was reported via the dirty
+    /// callback. Over-reporting (dirtying unchanged nodes) is permitted.
+    ///
+    /// `op` receives the tree and a `Vec` sink; push node indices into the
+    /// sink from your own callback passed to `insert` / `withdraw` / etc.
+    fn run_and_check_dirty<R>(
+        tree: &mut Tree,
+        op: impl FnOnce(&mut Tree, &mut Vec<NodeIdx>) -> R,
+    ) -> R {
+        let before = snapshot_reachable(tree);
+        let mut dirty: Vec<NodeIdx> = Vec::new();
+        let result = op(tree, &mut dirty);
+        let after = snapshot_reachable(tree);
+        let dirty_set: BTreeSet<NodeIdx> = dirty.iter().copied().collect();
+        for (idx, after_node) in &after {
+            let changed = match before.get(idx) {
+                None => true,
+                Some(before_node) => before_node != after_node,
+            };
+            assert!(
+                !changed || dirty_set.contains(idx),
+                "slab index {} changed but was not reported via dirty callback \
+                 (dirty set = {:?}, before = {:?}, after = {:?})",
+                idx.get(),
+                dirty_set,
+                before.get(idx),
+                after_node,
+            );
+        }
+        result
     }
 
     fn ins(tree: &mut Tree, p: Prefix, ts_ms: u64) -> NodeIdx {
-        tree.insert(
-            p,
-            Timestamp::from_millis(ts_ms),
-            ThinData::default(),
-            &mut |_| {},
-        )
+        run_and_check_dirty(tree, |t, d| {
+            t.insert(
+                p,
+                Timestamp::from_millis(ts_ms),
+                ThinData::default(),
+                &mut |i| d.push(i),
+            )
+        })
     }
 
     fn wdw(tree: &mut Tree, p: Prefix, ts_ms: u64) -> bool {
-        tree.withdraw(p, Timestamp::from_millis(ts_ms), &mut |_| {})
+        run_and_check_dirty(tree, |t, d| {
+            t.withdraw(p, Timestamp::from_millis(ts_ms), &mut |i| d.push(i))
+        })
+    }
+
+    fn swp(tree: &mut Tree) {
+        run_and_check_dirty(tree, |t, d| {
+            t.sweep_tombstones(&mut |i| d.push(i));
+        });
     }
 
     #[test]
     fn empty_tree_lookup_returns_none() {
         let tree = new_tree();
-        assert_eq!(tree.lookup(v4(10, 0, 0, 1)), None);
+        assert_eq!(tree.lookup(addr("10.0.0.1")), None);
     }
 
     #[test]
     fn empty_tree_withdraw_returns_false() {
         let mut tree = new_tree();
-        assert!(!wdw(&mut tree, pfx(10, 0, 0, 0, 8), 1));
+        assert!(!wdw(&mut tree, v4("10.0.0.0/8"), 1));
     }
 
     #[test]
     fn empty_tree_sweep_is_noop() {
         let mut tree = new_tree();
-        tree.sweep_tombstones(&mut |_| {});
+        swp(&mut tree);
         assert!(tree.root().is_none());
     }
 
     #[test]
     fn insert_into_empty_tree_then_lookup() {
         let mut tree = new_tree();
-        let idx = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        assert_eq!(tree.lookup(v4(10, 1, 2, 3)), Some(idx));
+        let idx = ins(&mut tree, v4("10.0.0.0/8"), 100);
+        assert_eq!(tree.lookup(addr("10.1.2.3")), Some(idx));
         assert_eq!(tree.root(), Some(idx));
     }
 
     #[test]
     fn insert_two_disjoint_creates_split() {
         let mut tree = new_tree();
-        let a = ins(&mut tree, pfx(0, 0, 0, 0, 1), 100);
-        let b = ins(&mut tree, pfx(128, 0, 0, 0, 1), 200);
+        let a = ins(&mut tree, v4("0.0.0.0/1"), 100);
+        let b = ins(&mut tree, v4("128.0.0.0/1"), 200);
         let root = tree.root().unwrap();
         assert_ne!(root, a);
         assert_ne!(root, b);
@@ -369,31 +435,42 @@ mod tests {
         assert_eq!(root_node.prefix.len, 0);
         assert!(!root_node.is_announced());
         assert_eq!(root_node.child_count(), 2);
-        assert_eq!(tree.lookup(v4(1, 0, 0, 0)), Some(a));
-        assert_eq!(tree.lookup(v4(200, 0, 0, 0)), Some(b));
+        assert_eq!(tree.lookup(addr("1.0.0.0")), Some(a));
+        assert_eq!(tree.lookup(addr("200.0.0.0")), Some(b));
+    }
+
+    #[test]
+    fn split_node_does_not_leak_to_uncovered_addresses() {
+        // Two /8s with disjoint first bits force a split at /0. An address
+        // that neither /8 covers must return None, not inherit the split.
+        let mut tree = new_tree();
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        ins(&mut tree, v4("200.0.0.0/8"), 100);
+        assert!(!tree.slab.get(tree.root().unwrap()).is_announced());
+        assert_eq!(tree.lookup(addr("192.0.2.1")), None);
     }
 
     #[test]
     fn insert_extend_then_ancestor_promotion() {
         let mut tree = new_tree();
-        let long = ins(&mut tree, pfx(10, 0, 0, 0, 16), 100);
-        let short = ins(&mut tree, pfx(10, 0, 0, 0, 8), 200);
+        let long = ins(&mut tree, v4("10.0.0.0/16"), 100);
+        let short = ins(&mut tree, v4("10.0.0.0/8"), 200);
         assert_eq!(tree.root(), Some(short));
         assert!(tree.slab.get(short).is_announced());
         assert!(tree.slab.get(long).is_announced());
-        assert_eq!(tree.lookup(v4(10, 0, 0, 1)), Some(long));
-        assert_eq!(tree.lookup(v4(10, 128, 0, 1)), Some(short));
+        assert_eq!(tree.lookup(addr("10.0.0.1")), Some(long));
+        assert_eq!(tree.lookup(addr("10.128.0.1")), Some(short));
     }
 
     #[test]
     fn insert_extend_existing_intermediate() {
         let mut tree = new_tree();
-        let a = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        let b = ins(&mut tree, pfx(10, 128, 0, 0, 9), 200);
-        let c = ins(&mut tree, pfx(10, 0, 0, 0, 9), 300);
-        assert_eq!(tree.lookup(v4(10, 200, 0, 0)), Some(b));
-        assert_eq!(tree.lookup(v4(10, 1, 0, 0)), Some(c));
-        assert_eq!(tree.lookup(v4(10, 0, 0, 0)), Some(c));
+        let a = ins(&mut tree, v4("10.0.0.0/8"), 100);
+        let b = ins(&mut tree, v4("10.128.0.0/9"), 200);
+        let c = ins(&mut tree, v4("10.0.0.0/9"), 300);
+        assert_eq!(tree.lookup(addr("10.200.0.0")), Some(b));
+        assert_eq!(tree.lookup(addr("10.1.0.0")), Some(c));
+        assert_eq!(tree.lookup(addr("10.0.0.0")), Some(c));
         assert_ne!(a, b);
         assert_ne!(a, c);
     }
@@ -401,41 +478,41 @@ mod tests {
     #[test]
     fn lpm_finds_deepest_announced() {
         let mut tree = new_tree();
-        let eight = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        let sixteen = ins(&mut tree, pfx(10, 1, 0, 0, 16), 100);
-        assert_eq!(tree.lookup(v4(10, 1, 2, 3)), Some(sixteen));
-        assert_eq!(tree.lookup(v4(10, 2, 2, 3)), Some(eight));
+        let eight = ins(&mut tree, v4("10.0.0.0/8"), 100);
+        let sixteen = ins(&mut tree, v4("10.1.0.0/16"), 100);
+        assert_eq!(tree.lookup(addr("10.1.2.3")), Some(sixteen));
+        assert_eq!(tree.lookup(addr("10.2.2.3")), Some(eight));
     }
 
     #[test]
     fn lookup_no_match_returns_none_in_populated_tree() {
         let mut tree = new_tree();
-        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        assert_eq!(tree.lookup(v4(192, 0, 2, 1)), None);
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        assert_eq!(tree.lookup(addr("192.0.2.1")), None);
     }
 
     #[test]
     fn withdrawn_hidden_from_lookup_before_sweep() {
         let mut tree = new_tree();
-        let a = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
-        assert_eq!(tree.lookup(v4(10, 1, 2, 3)), None);
+        let a = ins(&mut tree, v4("10.0.0.0/8"), 100);
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        assert_eq!(tree.lookup(addr("10.1.2.3")), None);
         assert!(!tree.slab.get(a).is_announced());
     }
 
     #[test]
     fn double_withdraw_returns_false() {
         let mut tree = new_tree();
-        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
-        assert!(!wdw(&mut tree, pfx(10, 0, 0, 0, 8), 300));
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        assert!(!wdw(&mut tree, v4("10.0.0.0/8"), 300));
     }
 
     #[test]
     fn timestamp_propagates_to_root() {
         let mut tree = new_tree();
-        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        ins(&mut tree, pfx(128, 0, 0, 0, 8), 500);
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        ins(&mut tree, v4("128.0.0.0/8"), 500);
         let root = tree.root().unwrap();
         assert_eq!(
             tree.slab.get(root).data.timestamp(),
@@ -446,8 +523,8 @@ mod tests {
     #[test]
     fn timestamp_propagation_monotonic() {
         let mut tree = new_tree();
-        ins(&mut tree, pfx(10, 0, 0, 0, 8), 500);
-        ins(&mut tree, pfx(128, 0, 0, 0, 8), 200);
+        ins(&mut tree, v4("10.0.0.0/8"), 500);
+        ins(&mut tree, v4("128.0.0.0/8"), 200);
         let root = tree.root().unwrap();
         assert_eq!(
             tree.slab.get(root).data.timestamp(),
@@ -456,29 +533,12 @@ mod tests {
     }
 
     #[test]
-    fn dirty_callback_emits_target_and_advanced_ancestors() {
-        let mut tree = new_tree();
-        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        ins(&mut tree, pfx(128, 0, 0, 0, 8), 100);
-        let mut dirty: Vec<NodeIdx> = Vec::new();
-        let leaf = tree.insert(
-            pfx(10, 1, 0, 0, 16),
-            Timestamp::from_millis(500),
-            ThinData::default(),
-            &mut |i| dirty.push(i),
-        );
-        assert!(dirty.contains(&leaf), "target must be dirty");
-        let root = tree.root().unwrap();
-        assert!(dirty.contains(&root), "root should be dirty (ts advanced)");
-    }
-
-    #[test]
     fn reannounce_reuses_slot() {
         let mut tree = new_tree();
-        let a = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        let a = ins(&mut tree, v4("10.0.0.0/8"), 100);
         let len_before = tree.slab.len();
-        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
-        let b = ins(&mut tree, pfx(10, 0, 0, 0, 8), 300);
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        let b = ins(&mut tree, v4("10.0.0.0/8"), 300);
         assert_eq!(a, b, "re-announce should reuse the slot");
         assert_eq!(tree.slab.len(), len_before);
         assert!(tree.slab.get(a).is_announced());
@@ -487,26 +547,25 @@ mod tests {
     #[test]
     fn sweep_collapses_withdrawn_chain() {
         let mut tree = new_tree();
-        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        ins(&mut tree, pfx(10, 0, 0, 0, 16), 100);
-        ins(&mut tree, pfx(10, 0, 0, 0, 24), 100);
-        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 24), 200));
-        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 16), 200));
-        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
-        let mut freed: Vec<NodeIdx> = Vec::new();
-        tree.sweep_tombstones(&mut |i| freed.push(i));
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        ins(&mut tree, v4("10.0.0.0/16"), 100);
+        ins(&mut tree, v4("10.0.0.0/24"), 100);
+        assert!(wdw(&mut tree, v4("10.0.0.0/24"), 200));
+        assert!(wdw(&mut tree, v4("10.0.0.0/16"), 200));
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        swp(&mut tree);
         assert_eq!(tree.root(), None);
     }
 
     #[test]
     fn sweep_collapses_degenerate_split() {
         let mut tree = new_tree();
-        ins(&mut tree, pfx(0, 0, 0, 0, 8), 100);
-        let b = ins(&mut tree, pfx(128, 0, 0, 0, 8), 100);
+        ins(&mut tree, v4("0.0.0.0/8"), 100);
+        let b = ins(&mut tree, v4("128.0.0.0/8"), 100);
         let root_before = tree.root().unwrap();
         assert!(!tree.slab.get(root_before).is_announced());
-        assert!(wdw(&mut tree, pfx(0, 0, 0, 0, 8), 200));
-        tree.sweep_tombstones(&mut |_| {});
+        assert!(wdw(&mut tree, v4("0.0.0.0/8"), 200));
+        swp(&mut tree);
         assert_eq!(
             tree.root(),
             Some(b),
@@ -517,13 +576,13 @@ mod tests {
     #[test]
     fn sweep_idempotent() {
         let mut tree = new_tree();
-        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
-        ins(&mut tree, pfx(11, 0, 0, 0, 8), 100);
-        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
-        tree.sweep_tombstones(&mut |_| {});
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        ins(&mut tree, v4("11.0.0.0/8"), 100);
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        swp(&mut tree);
         let root_after_first = tree.root();
         let len_after_first = tree.slab.len();
-        tree.sweep_tombstones(&mut |_| {});
+        swp(&mut tree);
         assert_eq!(tree.root(), root_after_first);
         assert_eq!(tree.slab.len(), len_after_first);
     }
@@ -531,17 +590,15 @@ mod tests {
     #[test]
     fn ipv6_lookup() {
         let mut tree = new_tree();
-        let sixty_four = tree.insert(
+        let sixty_four = ins(
+            &mut tree,
             Prefix::new([0x2001_0db8, 0x1234_0000, 0, 0], 64),
-            Timestamp::from_millis(100),
-            ThinData::default(),
-            &mut |_| {},
+            100,
         );
-        let one_twenty_eight = tree.insert(
+        let one_twenty_eight = ins(
+            &mut tree,
             Prefix::new([0x2001_0db8, 0x1234_0000, 0, 1], 128),
-            Timestamp::from_millis(100),
-            ThinData::default(),
-            &mut |_| {},
+            100,
         );
         assert_eq!(
             tree.lookup([0x2001_0db8, 0x1234_0000, 0, 1]),
