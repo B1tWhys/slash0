@@ -10,6 +10,29 @@ pub struct RadixTree<D: NodeData, S: Slab<Node<D>>> {
     _phantom: PhantomData<D>,
 }
 
+/// Outcome of a single `insert_recursive` frame, returned back up the stack
+/// so the parent frame can rewire its child pointer, merge its own timestamp,
+/// and decide whether to keep propagating.
+struct InsertOutcome {
+    /// Node index the parent should now reference at this slot. Equals the
+    /// input `subroot` unless the frame restructured (split / promotion).
+    new_subroot: NodeIdx,
+    /// The announced target node index — returned all the way up unchanged.
+    target: NodeIdx,
+    /// Whether `ts` advanced this level's timestamp. Once this is false, the
+    /// max-to-root invariant guarantees no ancestor above will advance either.
+    ts_advanced: bool,
+}
+
+/// Outcome of a single `withdraw_recursive` frame.
+enum WithdrawOutcome {
+    NotFound,
+    Withdrew {
+        /// Whether `ts` advanced this level's timestamp; see `InsertOutcome`.
+        ts_advanced: bool,
+    },
+}
+
 impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
     pub fn new(slab: S) -> Self {
         Self {
@@ -30,103 +53,131 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         incoming: D,
         dirty: &mut impl FnMut(NodeIdx),
     ) -> NodeIdx {
-        let Some(mut current) = self.root else {
-            let idx = self.alloc_announced_node(prefix, &incoming, ts);
-            self.root = Some(idx);
-            dirty(idx);
-            return idx;
+        match self.root {
+            None => {
+                let idx = self.alloc_announced_node(prefix, &incoming, ts);
+                self.root = Some(idx);
+                dirty(idx);
+                idx
+            }
+            Some(root) => {
+                let outcome = self.insert_recursive(root, prefix, &incoming, ts, dirty);
+                self.root = Some(outcome.new_subroot);
+                outcome.target
+            }
+        }
+    }
+
+    /// Recursive descent from `subroot`. See `InsertOutcome`.
+    fn insert_recursive(
+        &mut self,
+        subroot: NodeIdx,
+        prefix: Prefix,
+        incoming: &D,
+        ts: Timestamp,
+        dirty: &mut impl FnMut(NodeIdx),
+    ) -> InsertOutcome {
+        let (node_prefix, node_children) = {
+            let node = self.slab.get(subroot);
+            (node.prefix, node.children)
         };
 
-        let mut path: [Option<NodeIdx>; MAX_PREFIX_LEN as usize + 1] =
-            [None; MAX_PREFIX_LEN as usize + 1];
-        let mut path_len: usize = 0;
-        let mut parent: Option<(NodeIdx, usize)> = None;
-
-        loop {
-            let (node_prefix, node_children) = {
-                let node = self.slab.get(current);
-                (node.prefix, node.children)
-            };
-            let common = prefix.common_prefix_len(&node_prefix);
-
-            if common == node_prefix.len && common == prefix.len {
-                {
-                    let node = self.slab.get_mut(current);
-                    node.set_announced(true);
-                    node.data.apply_announce(&incoming, ts);
-                }
-                dirty(current);
-                self.propagate_up(&path[..path_len], ts, dirty);
-                return current;
-            }
-
-            if common == node_prefix.len {
-                let bit = prefix.bit_at(node_prefix.len) as usize;
-                if let Some(child) = node_children[bit] {
-                    path[path_len] = Some(current);
-                    path_len += 1;
-                    parent = Some((current, bit));
-                    current = child;
-                    continue;
-                }
-                let leaf_idx = self.alloc_announced_node(prefix, &incoming, ts);
-                self.slab.get_mut(current).children[bit] = Some(leaf_idx);
-                dirty(leaf_idx);
-                self.dirty_and_propagate(current, ts, &path[..path_len], dirty);
-                return leaf_idx;
-            }
-
-            if common == prefix.len {
-                let node_bit = node_prefix.bit_at(prefix.len) as usize;
-                let current_ts = self.slab.get(current).data.timestamp();
-                let new_idx = self.alloc_announced_node(prefix, &incoming, ts);
-                {
-                    let n = self.slab.get_mut(new_idx);
-                    n.data.merge_ancestor(current_ts);
-                    n.children[node_bit] = Some(current);
-                }
-                dirty(new_idx);
-                // Handle the parent (pointer edit + possible ts advance) once.
-                // current itself is unchanged.
-                match parent {
-                    None => self.root = Some(new_idx),
-                    Some((parent_idx, slot)) => {
-                        self.slab.get_mut(parent_idx).children[slot] = Some(new_idx);
-                        debug_assert_eq!(path[path_len - 1], Some(parent_idx));
-                        path_len -= 1;
-                        self.dirty_and_propagate(parent_idx, ts, &path[..path_len], dirty);
-                    }
-                }
-                return new_idx;
-            }
-
-            // Split: `current` and the new leaf share `common` bits; branch below there.
-            let split_prefix = Prefix::new(prefix.bits, common);
-            let leaf_bit = prefix.bit_at(common) as usize;
-            let node_bit = node_prefix.bit_at(common) as usize;
-            debug_assert_ne!(leaf_bit, node_bit);
-            let current_ts = self.slab.get(current).data.timestamp();
-
-            let leaf_idx = self.alloc_announced_node(prefix, &incoming, ts);
-            let split_idx = self.alloc_split_node(split_prefix, current_ts);
+        // Exact match: re-announce at subroot.
+        if node_prefix == prefix {
+            let before = self.slab.get(subroot).data.timestamp();
             {
-                let split = self.slab.get_mut(split_idx);
-                split.children[leaf_bit] = Some(leaf_idx);
-                split.children[node_bit] = Some(current);
-                split.data.merge_ancestor(ts);
+                let node = self.slab.get_mut(subroot);
+                node.set_announced(true);
+                node.data.apply_announce(incoming, ts);
             }
-            dirty(split_idx);
-            dirty(leaf_idx);
-            match parent {
-                None => self.root = Some(split_idx),
-                Some((parent_idx, slot)) => {
-                    self.slab.get_mut(parent_idx).children[slot] = Some(split_idx);
-                    debug_assert_eq!(path[path_len - 1], Some(parent_idx));
-                    path_len -= 1;
-                    self.dirty_and_propagate(parent_idx, ts, &path[..path_len], dirty);
+            dirty(subroot);
+            return InsertOutcome {
+                new_subroot: subroot,
+                target: subroot,
+                ts_advanced: ts > before,
+            };
+        }
+
+        let common = prefix.common_prefix_len(&node_prefix);
+
+        // Prefix extends subroot: descend into an existing child or graft a
+        // new leaf.
+        if common == node_prefix.len {
+            let bit = prefix.bit_at(node_prefix.len) as usize;
+            if let Some(child) = node_children[bit] {
+                let sub = self.insert_recursive(child, prefix, incoming, ts, dirty);
+                let child_changed = sub.new_subroot != child;
+                if child_changed {
+                    self.slab.get_mut(subroot).children[bit] = Some(sub.new_subroot);
                 }
+                let ts_advanced = sub.ts_advanced && {
+                    let before = self.slab.get(subroot).data.timestamp();
+                    self.slab.get_mut(subroot).data.merge_ancestor(ts);
+                    self.slab.get(subroot).data.timestamp() != before
+                };
+                if child_changed || ts_advanced {
+                    dirty(subroot);
+                }
+                return InsertOutcome {
+                    new_subroot: subroot,
+                    target: sub.target,
+                    ts_advanced,
+                };
             }
-            return leaf_idx;
+            // No child in that slot — subroot gains a new leaf.
+            let leaf_idx = self.alloc_announced_node(prefix, incoming, ts);
+            self.slab.get_mut(subroot).children[bit] = Some(leaf_idx);
+            dirty(leaf_idx);
+            let before = self.slab.get(subroot).data.timestamp();
+            self.slab.get_mut(subroot).data.merge_ancestor(ts);
+            let after = self.slab.get(subroot).data.timestamp();
+            dirty(subroot);
+            return InsertOutcome {
+                new_subroot: subroot,
+                target: leaf_idx,
+                ts_advanced: after != before,
+            };
+        }
+
+        // Subroot extends prefix: prefix is an ancestor of subroot; splice a
+        // new announced node above.
+        if common == prefix.len {
+            let node_bit = node_prefix.bit_at(prefix.len) as usize;
+            let subtree_ts = self.slab.get(subroot).data.timestamp();
+            let new_idx = self.alloc_announced_node(prefix, incoming, ts);
+            {
+                let n = self.slab.get_mut(new_idx);
+                n.data.merge_ancestor(subtree_ts);
+                n.children[node_bit] = Some(subroot);
+            }
+            dirty(new_idx);
+            return InsertOutcome {
+                new_subroot: new_idx,
+                target: new_idx,
+                ts_advanced: ts > subtree_ts,
+            };
+        }
+
+        // Split: subroot and the new leaf share `common` bits; branch below.
+        let subtree_ts = self.slab.get(subroot).data.timestamp();
+        let split_prefix = Prefix::new(prefix.bits, common);
+        let leaf_bit = prefix.bit_at(common) as usize;
+        let node_bit = node_prefix.bit_at(common) as usize;
+        debug_assert_ne!(leaf_bit, node_bit);
+        let leaf_idx = self.alloc_announced_node(prefix, incoming, ts);
+        let split_idx = self.alloc_split_node(split_prefix, subtree_ts);
+        {
+            let split = self.slab.get_mut(split_idx);
+            split.children[leaf_bit] = Some(leaf_idx);
+            split.children[node_bit] = Some(subroot);
+            split.data.merge_ancestor(ts);
+        }
+        dirty(split_idx);
+        dirty(leaf_idx);
+        InsertOutcome {
+            new_subroot: split_idx,
+            target: leaf_idx,
+            ts_advanced: ts > subtree_ts,
         }
     }
 
@@ -136,45 +187,67 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         ts: Timestamp,
         dirty: &mut impl FnMut(NodeIdx),
     ) -> bool {
-        let Some(mut current) = self.root else {
+        let Some(root) = self.root else {
             return false;
         };
-        let mut path: [Option<NodeIdx>; MAX_PREFIX_LEN as usize + 1] =
-            [None; MAX_PREFIX_LEN as usize + 1];
-        let mut path_len: usize = 0;
+        matches!(
+            self.withdraw_recursive(root, prefix, ts, dirty),
+            WithdrawOutcome::Withdrew { .. }
+        )
+    }
 
-        loop {
-            let (node_prefix, node_children, is_announced) = {
-                let node = self.slab.get(current);
-                (node.prefix, node.children, node.is_announced())
+    fn withdraw_recursive(
+        &mut self,
+        subroot: NodeIdx,
+        prefix: Prefix,
+        ts: Timestamp,
+        dirty: &mut impl FnMut(NodeIdx),
+    ) -> WithdrawOutcome {
+        let (node_prefix, node_children, is_announced) = {
+            let node = self.slab.get(subroot);
+            (node.prefix, node.children, node.is_announced())
+        };
+
+        // Exact match: withdraw here if currently announced.
+        if node_prefix == prefix {
+            if !is_announced {
+                return WithdrawOutcome::NotFound;
+            }
+            let before = self.slab.get(subroot).data.timestamp();
+            {
+                let node = self.slab.get_mut(subroot);
+                node.set_announced(false);
+                node.data.apply_withdraw(ts);
+            }
+            dirty(subroot);
+            return WithdrawOutcome::Withdrew {
+                ts_advanced: ts > before,
             };
+        }
 
-            if node_prefix == prefix {
-                if !is_announced {
-                    return false;
-                }
-                {
-                    let node = self.slab.get_mut(current);
-                    node.set_announced(false);
-                    node.data.apply_withdraw(ts);
-                }
-                dirty(current);
-                self.propagate_up(&path[..path_len], ts, dirty);
-                return true;
-            }
+        let common = prefix.common_prefix_len(&node_prefix);
+        if common < node_prefix.len {
+            return WithdrawOutcome::NotFound;
+        }
+        let bit = prefix.bit_at(node_prefix.len) as usize;
+        let Some(child) = node_children[bit] else {
+            return WithdrawOutcome::NotFound;
+        };
 
-            let common = prefix.common_prefix_len(&node_prefix);
-            if common < node_prefix.len {
-                return false;
-            }
-            let bit = prefix.bit_at(node_prefix.len) as usize;
-            match node_children[bit] {
-                None => return false,
-                Some(child) => {
-                    path[path_len] = Some(current);
-                    path_len += 1;
-                    current = child;
+        match self.withdraw_recursive(child, prefix, ts, dirty) {
+            WithdrawOutcome::NotFound => WithdrawOutcome::NotFound,
+            WithdrawOutcome::Withdrew {
+                ts_advanced: sub_advanced,
+            } => {
+                let ts_advanced = sub_advanced && {
+                    let before = self.slab.get(subroot).data.timestamp();
+                    self.slab.get_mut(subroot).data.merge_ancestor(ts);
+                    self.slab.get(subroot).data.timestamp() != before
+                };
+                if ts_advanced {
+                    dirty(subroot);
                 }
+                WithdrawOutcome::Withdrew { ts_advanced }
             }
         }
     }
@@ -206,26 +279,22 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
     }
 
     pub fn lookup(&self, addr: [u32; 4]) -> Option<NodeIdx> {
-        let mut current = self.root?;
-        let mut best: Option<NodeIdx> = None;
+        self.lookup_recursive(self.root?, addr)
+    }
 
-        loop {
-            let node = self.slab.get(current);
-            if !node.prefix.covers(&addr) {
-                return best;
-            }
-            if node.is_announced() {
-                best = Some(current);
-            }
-            if node.prefix.len == MAX_PREFIX_LEN {
-                return best;
-            }
-            let bit = crate::prefix::bit_at(&addr, node.prefix.len) as usize;
-            match node.children[bit] {
-                None => return best,
-                Some(child) => current = child,
-            }
+    fn lookup_recursive(&self, subroot: NodeIdx, addr: [u32; 4]) -> Option<NodeIdx> {
+        let node = self.slab.get(subroot);
+        if !node.prefix.covers(&addr) {
+            return None;
         }
+        // Prefer any deeper announced descendant over this level.
+        let deeper = if node.prefix.len < MAX_PREFIX_LEN {
+            let bit = crate::prefix::bit_at(&addr, node.prefix.len) as usize;
+            node.children[bit].and_then(|c| self.lookup_recursive(c, addr))
+        } else {
+            None
+        };
+        deeper.or_else(|| node.is_announced().then_some(subroot))
     }
 
     pub fn sweep_tombstones(&mut self, dirty: &mut impl FnMut(NodeIdx)) {
@@ -292,46 +361,6 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                 self.slab.get_mut(parent).children[slot] = value;
                 dirty(parent);
             }
-        }
-    }
-
-    fn propagate_up(
-        &mut self,
-        path: &[Option<NodeIdx>],
-        ts: Timestamp,
-        dirty: &mut impl FnMut(NodeIdx),
-    ) {
-        for &opt_idx in path.iter().rev() {
-            let idx = opt_idx.expect("path entries are always Some");
-            let before = self.slab.get(idx).data.timestamp();
-            self.slab.get_mut(idx).data.merge_ancestor(ts);
-            let after = self.slab.get(idx).data.timestamp();
-            if after != before {
-                dirty(idx);
-            } else {
-                break;
-            }
-        }
-    }
-
-    /// Merge `ts` into `target`, dirty `target` unconditionally, and only
-    /// propagate further into `ancestors` (strictly above `target`) if
-    /// `target`'s timestamp actually advanced. Ensures `target` is emitted
-    /// exactly once even when its bytes changed for a non-timestamp reason
-    /// (e.g., a children-pointer edit).
-    fn dirty_and_propagate(
-        &mut self,
-        target: NodeIdx,
-        ts: Timestamp,
-        ancestors: &[Option<NodeIdx>],
-        dirty: &mut impl FnMut(NodeIdx),
-    ) {
-        let before = self.slab.get(target).data.timestamp();
-        self.slab.get_mut(target).data.merge_ancestor(ts);
-        let after = self.slab.get(target).data.timestamp();
-        dirty(target);
-        if after != before {
-            self.propagate_up(ancestors, ts, dirty);
         }
     }
 }
