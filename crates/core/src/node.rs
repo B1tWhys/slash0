@@ -1,3 +1,4 @@
+use crate::prefix::Prefix;
 use crate::timestamp::Timestamp;
 use core::num::NonZeroU32;
 
@@ -42,8 +43,7 @@ pub trait ThinNodeData: NodeData + Copy {}
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Node<D> {
     pub children: [Option<NodeIdx>; 2],
-    pub prefix: [u32; 4],
-    pub prefix_len: u32,
+    pub prefix: Prefix,
     pub flags: NodeFlags,
     pub data: D,
 }

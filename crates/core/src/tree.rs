@@ -1,5 +1,5 @@
 use crate::node::{Node, NodeData, NodeFlags, NodeIdx};
-use crate::prefix::{MAX_PREFIX_LEN, bit_at, common_prefix_len, mask_prefix};
+use crate::prefix::{MAX_PREFIX_LEN, Prefix};
 use crate::slab::Slab;
 use crate::timestamp::Timestamp;
 use core::marker::PhantomData;
@@ -25,17 +25,13 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
 
     pub fn insert(
         &mut self,
-        prefix: [u32; 4],
-        prefix_len: u32,
+        prefix: Prefix,
         ts: Timestamp,
         incoming: D,
         dirty: &mut impl FnMut(NodeIdx),
     ) -> NodeIdx {
-        assert!(prefix_len <= MAX_PREFIX_LEN);
-        let prefix = mask_prefix(prefix, prefix_len);
-
         let Some(mut current) = self.root else {
-            let idx = self.alloc_announced_node(prefix, prefix_len, &incoming, ts);
+            let idx = self.alloc_announced_node(prefix, &incoming, ts);
             self.root = Some(idx);
             dirty(idx);
             return idx;
@@ -47,13 +43,13 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         let mut parent: Option<(NodeIdx, usize)> = None;
 
         loop {
-            let (node_prefix, node_prefix_len, node_children) = {
+            let (node_prefix, node_children) = {
                 let node = self.slab.get(current);
-                (node.prefix, node.prefix_len, node.children)
+                (node.prefix, node.children)
             };
-            let common = common_prefix_len(&prefix, prefix_len, &node_prefix, node_prefix_len);
+            let common = prefix.common_prefix_len(&node_prefix);
 
-            if common == node_prefix_len && common == prefix_len {
+            if common == node_prefix.len && common == prefix.len {
                 {
                     let node = self.slab.get_mut(current);
                     node.set_announced(true);
@@ -64,8 +60,8 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                 return current;
             }
 
-            if common == node_prefix_len {
-                let bit = bit_at(&prefix, node_prefix_len) as usize;
+            if common == node_prefix.len {
+                let bit = prefix.bit_at(node_prefix.len) as usize;
                 if let Some(child) = node_children[bit] {
                     path[path_len] = Some(current);
                     path_len += 1;
@@ -73,7 +69,7 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                     current = child;
                     continue;
                 }
-                let leaf_idx = self.alloc_announced_node(prefix, prefix_len, &incoming, ts);
+                let leaf_idx = self.alloc_announced_node(prefix, &incoming, ts);
                 self.slab.get_mut(current).children[bit] = Some(leaf_idx);
                 dirty(current);
                 dirty(leaf_idx);
@@ -83,10 +79,10 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                 return leaf_idx;
             }
 
-            if common == prefix_len {
-                let node_bit = bit_at(&node_prefix, prefix_len) as usize;
+            if common == prefix.len {
+                let node_bit = node_prefix.bit_at(prefix.len) as usize;
                 let current_ts = self.slab.get(current).data.timestamp();
-                let new_idx = self.alloc_announced_node(prefix, prefix_len, &incoming, ts);
+                let new_idx = self.alloc_announced_node(prefix, &incoming, ts);
                 {
                     let n = self.slab.get_mut(new_idx);
                     n.data.merge_ancestor(current_ts);
@@ -100,14 +96,14 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
             }
 
             // Split: `current` and the new leaf share `common` bits; branch below there.
-            let split_prefix = mask_prefix(prefix, common);
-            let leaf_bit = bit_at(&prefix, common) as usize;
-            let node_bit = bit_at(&node_prefix, common) as usize;
+            let split_prefix = Prefix::new(prefix.bits, common);
+            let leaf_bit = prefix.bit_at(common) as usize;
+            let node_bit = node_prefix.bit_at(common) as usize;
             debug_assert_ne!(leaf_bit, node_bit);
             let current_ts = self.slab.get(current).data.timestamp();
 
-            let leaf_idx = self.alloc_announced_node(prefix, prefix_len, &incoming, ts);
-            let split_idx = self.alloc_split_node(split_prefix, common, current_ts);
+            let leaf_idx = self.alloc_announced_node(prefix, &incoming, ts);
+            let split_idx = self.alloc_split_node(split_prefix, current_ts);
             {
                 let split = self.slab.get_mut(split_idx);
                 split.children[leaf_bit] = Some(leaf_idx);
@@ -126,14 +122,10 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
 
     pub fn withdraw(
         &mut self,
-        prefix: [u32; 4],
-        prefix_len: u32,
+        prefix: Prefix,
         ts: Timestamp,
         dirty: &mut impl FnMut(NodeIdx),
     ) -> bool {
-        assert!(prefix_len <= MAX_PREFIX_LEN);
-        let prefix = mask_prefix(prefix, prefix_len);
-
         let Some(mut current) = self.root else {
             return false;
         };
@@ -142,17 +134,12 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         let mut path_len: usize = 0;
 
         loop {
-            let (node_prefix, node_prefix_len, node_children, is_announced) = {
+            let (node_prefix, node_children, is_announced) = {
                 let node = self.slab.get(current);
-                (
-                    node.prefix,
-                    node.prefix_len,
-                    node.children,
-                    node.is_announced(),
-                )
+                (node.prefix, node.children, node.is_announced())
             };
 
-            if prefix_len == node_prefix_len && prefix == node_prefix {
+            if node_prefix == prefix {
                 if !is_announced {
                     return false;
                 }
@@ -166,11 +153,11 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                 return true;
             }
 
-            let common = common_prefix_len(&prefix, prefix_len, &node_prefix, node_prefix_len);
-            if common < node_prefix_len {
+            let common = prefix.common_prefix_len(&node_prefix);
+            if common < node_prefix.len {
                 return false;
             }
-            let bit = bit_at(&prefix, node_prefix_len) as usize;
+            let bit = prefix.bit_at(node_prefix.len) as usize;
             match node_children[bit] {
                 None => return false,
                 Some(child) => {
@@ -182,39 +169,26 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         }
     }
 
-    fn alloc_announced_node(
-        &mut self,
-        prefix: [u32; 4],
-        prefix_len: u32,
-        incoming: &D,
-        ts: Timestamp,
-    ) -> NodeIdx {
+    fn alloc_announced_node(&mut self, prefix: Prefix, incoming: &D, ts: Timestamp) -> NodeIdx {
         let idx = self.slab.alloc().expect("slab full");
         let mut data = D::default();
         data.apply_announce(incoming, ts);
         *self.slab.get_mut(idx) = Node {
             children: [None, None],
             prefix,
-            prefix_len,
             flags: NodeFlags::ANNOUNCED,
             data,
         };
         idx
     }
 
-    fn alloc_split_node(
-        &mut self,
-        prefix: [u32; 4],
-        prefix_len: u32,
-        subtree_ts: Timestamp,
-    ) -> NodeIdx {
+    fn alloc_split_node(&mut self, prefix: Prefix, subtree_ts: Timestamp) -> NodeIdx {
         let idx = self.slab.alloc().expect("slab full");
         let mut data = D::default();
         data.merge_ancestor(subtree_ts);
         *self.slab.get_mut(idx) = Node {
             children: [None, None],
             prefix,
-            prefix_len,
             flags: NodeFlags::empty(),
             data,
         };
@@ -227,17 +201,16 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
 
         loop {
             let node = self.slab.get(current);
-            let common = common_prefix_len(&node.prefix, node.prefix_len, &addr, MAX_PREFIX_LEN);
-            if common < node.prefix_len {
+            if !node.prefix.covers(&addr) {
                 return best;
             }
             if node.is_announced() {
                 best = Some(current);
             }
-            if node.prefix_len == MAX_PREFIX_LEN {
+            if node.prefix.len == MAX_PREFIX_LEN {
                 return best;
             }
-            let bit = bit_at(&addr, node.prefix_len) as usize;
+            let bit = crate::prefix::bit_at(&addr, node.prefix.len) as usize;
             match node.children[bit] {
                 None => return best,
                 Some(child) => current = child,
@@ -340,18 +313,21 @@ mod tests {
         [word0, 0, 0, 0]
     }
 
-    fn ins(tree: &mut Tree, p: [u32; 4], len: u32, ts_ms: u64) -> NodeIdx {
+    fn pfx(a: u8, b: u8, c: u8, d: u8, len: u32) -> Prefix {
+        Prefix::new(v4(a, b, c, d), len)
+    }
+
+    fn ins(tree: &mut Tree, p: Prefix, ts_ms: u64) -> NodeIdx {
         tree.insert(
             p,
-            len,
             Timestamp::from_millis(ts_ms),
             ThinData::default(),
             &mut |_| {},
         )
     }
 
-    fn wdw(tree: &mut Tree, p: [u32; 4], len: u32, ts_ms: u64) -> bool {
-        tree.withdraw(p, len, Timestamp::from_millis(ts_ms), &mut |_| {})
+    fn wdw(tree: &mut Tree, p: Prefix, ts_ms: u64) -> bool {
+        tree.withdraw(p, Timestamp::from_millis(ts_ms), &mut |_| {})
     }
 
     #[test]
@@ -363,7 +339,7 @@ mod tests {
     #[test]
     fn empty_tree_withdraw_returns_false() {
         let mut tree = new_tree();
-        assert!(!wdw(&mut tree, v4(10, 0, 0, 0), 8, 1));
+        assert!(!wdw(&mut tree, pfx(10, 0, 0, 0, 8), 1));
     }
 
     #[test]
@@ -376,7 +352,7 @@ mod tests {
     #[test]
     fn insert_into_empty_tree_then_lookup() {
         let mut tree = new_tree();
-        let idx = ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
+        let idx = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
         assert_eq!(tree.lookup(v4(10, 1, 2, 3)), Some(idx));
         assert_eq!(tree.root(), Some(idx));
     }
@@ -384,13 +360,13 @@ mod tests {
     #[test]
     fn insert_two_disjoint_creates_split() {
         let mut tree = new_tree();
-        let a = ins(&mut tree, v4(0, 0, 0, 0), 1, 100);
-        let b = ins(&mut tree, v4(128, 0, 0, 0), 1, 200);
+        let a = ins(&mut tree, pfx(0, 0, 0, 0, 1), 100);
+        let b = ins(&mut tree, pfx(128, 0, 0, 0, 1), 200);
         let root = tree.root().unwrap();
         assert_ne!(root, a);
         assert_ne!(root, b);
         let root_node = tree.slab.get(root);
-        assert_eq!(root_node.prefix_len, 0);
+        assert_eq!(root_node.prefix.len, 0);
         assert!(!root_node.is_announced());
         assert_eq!(root_node.child_count(), 2);
         assert_eq!(tree.lookup(v4(1, 0, 0, 0)), Some(a));
@@ -400,8 +376,8 @@ mod tests {
     #[test]
     fn insert_extend_then_ancestor_promotion() {
         let mut tree = new_tree();
-        let long = ins(&mut tree, v4(10, 0, 0, 0), 16, 100);
-        let short = ins(&mut tree, v4(10, 0, 0, 0), 8, 200);
+        let long = ins(&mut tree, pfx(10, 0, 0, 0, 16), 100);
+        let short = ins(&mut tree, pfx(10, 0, 0, 0, 8), 200);
         assert_eq!(tree.root(), Some(short));
         assert!(tree.slab.get(short).is_announced());
         assert!(tree.slab.get(long).is_announced());
@@ -412,9 +388,9 @@ mod tests {
     #[test]
     fn insert_extend_existing_intermediate() {
         let mut tree = new_tree();
-        let a = ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
-        let b = ins(&mut tree, v4(10, 128, 0, 0), 9, 200);
-        let c = ins(&mut tree, v4(10, 0, 0, 0), 9, 300);
+        let a = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        let b = ins(&mut tree, pfx(10, 128, 0, 0, 9), 200);
+        let c = ins(&mut tree, pfx(10, 0, 0, 0, 9), 300);
         assert_eq!(tree.lookup(v4(10, 200, 0, 0)), Some(b));
         assert_eq!(tree.lookup(v4(10, 1, 0, 0)), Some(c));
         assert_eq!(tree.lookup(v4(10, 0, 0, 0)), Some(c));
@@ -425,8 +401,8 @@ mod tests {
     #[test]
     fn lpm_finds_deepest_announced() {
         let mut tree = new_tree();
-        let eight = ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
-        let sixteen = ins(&mut tree, v4(10, 1, 0, 0), 16, 100);
+        let eight = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        let sixteen = ins(&mut tree, pfx(10, 1, 0, 0, 16), 100);
         assert_eq!(tree.lookup(v4(10, 1, 2, 3)), Some(sixteen));
         assert_eq!(tree.lookup(v4(10, 2, 2, 3)), Some(eight));
     }
@@ -434,15 +410,15 @@ mod tests {
     #[test]
     fn lookup_no_match_returns_none_in_populated_tree() {
         let mut tree = new_tree();
-        ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
+        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
         assert_eq!(tree.lookup(v4(192, 0, 2, 1)), None);
     }
 
     #[test]
     fn withdrawn_hidden_from_lookup_before_sweep() {
         let mut tree = new_tree();
-        let a = ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
-        assert!(wdw(&mut tree, v4(10, 0, 0, 0), 8, 200));
+        let a = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
         assert_eq!(tree.lookup(v4(10, 1, 2, 3)), None);
         assert!(!tree.slab.get(a).is_announced());
     }
@@ -450,16 +426,16 @@ mod tests {
     #[test]
     fn double_withdraw_returns_false() {
         let mut tree = new_tree();
-        ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
-        assert!(wdw(&mut tree, v4(10, 0, 0, 0), 8, 200));
-        assert!(!wdw(&mut tree, v4(10, 0, 0, 0), 8, 300));
+        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
+        assert!(!wdw(&mut tree, pfx(10, 0, 0, 0, 8), 300));
     }
 
     #[test]
     fn timestamp_propagates_to_root() {
         let mut tree = new_tree();
-        ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
-        ins(&mut tree, v4(128, 0, 0, 0), 8, 500);
+        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        ins(&mut tree, pfx(128, 0, 0, 0, 8), 500);
         let root = tree.root().unwrap();
         assert_eq!(
             tree.slab.get(root).data.timestamp(),
@@ -470,8 +446,8 @@ mod tests {
     #[test]
     fn timestamp_propagation_monotonic() {
         let mut tree = new_tree();
-        ins(&mut tree, v4(10, 0, 0, 0), 8, 500);
-        ins(&mut tree, v4(128, 0, 0, 0), 8, 200);
+        ins(&mut tree, pfx(10, 0, 0, 0, 8), 500);
+        ins(&mut tree, pfx(128, 0, 0, 0, 8), 200);
         let root = tree.root().unwrap();
         assert_eq!(
             tree.slab.get(root).data.timestamp(),
@@ -482,12 +458,11 @@ mod tests {
     #[test]
     fn dirty_callback_emits_target_and_advanced_ancestors() {
         let mut tree = new_tree();
-        ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
-        ins(&mut tree, v4(128, 0, 0, 0), 8, 100);
+        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        ins(&mut tree, pfx(128, 0, 0, 0, 8), 100);
         let mut dirty: Vec<NodeIdx> = Vec::new();
         let leaf = tree.insert(
-            v4(10, 1, 0, 0),
-            16,
+            pfx(10, 1, 0, 0, 16),
             Timestamp::from_millis(500),
             ThinData::default(),
             &mut |i| dirty.push(i),
@@ -500,10 +475,10 @@ mod tests {
     #[test]
     fn reannounce_reuses_slot() {
         let mut tree = new_tree();
-        let a = ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
+        let a = ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
         let len_before = tree.slab.len();
-        assert!(wdw(&mut tree, v4(10, 0, 0, 0), 8, 200));
-        let b = ins(&mut tree, v4(10, 0, 0, 0), 8, 300);
+        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
+        let b = ins(&mut tree, pfx(10, 0, 0, 0, 8), 300);
         assert_eq!(a, b, "re-announce should reuse the slot");
         assert_eq!(tree.slab.len(), len_before);
         assert!(tree.slab.get(a).is_announced());
@@ -512,12 +487,12 @@ mod tests {
     #[test]
     fn sweep_collapses_withdrawn_chain() {
         let mut tree = new_tree();
-        ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
-        ins(&mut tree, v4(10, 0, 0, 0), 16, 100);
-        ins(&mut tree, v4(10, 0, 0, 0), 24, 100);
-        assert!(wdw(&mut tree, v4(10, 0, 0, 0), 24, 200));
-        assert!(wdw(&mut tree, v4(10, 0, 0, 0), 16, 200));
-        assert!(wdw(&mut tree, v4(10, 0, 0, 0), 8, 200));
+        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        ins(&mut tree, pfx(10, 0, 0, 0, 16), 100);
+        ins(&mut tree, pfx(10, 0, 0, 0, 24), 100);
+        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 24), 200));
+        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 16), 200));
+        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
         let mut freed: Vec<NodeIdx> = Vec::new();
         tree.sweep_tombstones(&mut |i| freed.push(i));
         assert_eq!(tree.root(), None);
@@ -526,11 +501,11 @@ mod tests {
     #[test]
     fn sweep_collapses_degenerate_split() {
         let mut tree = new_tree();
-        ins(&mut tree, v4(0, 0, 0, 0), 8, 100);
-        let b = ins(&mut tree, v4(128, 0, 0, 0), 8, 100);
+        ins(&mut tree, pfx(0, 0, 0, 0, 8), 100);
+        let b = ins(&mut tree, pfx(128, 0, 0, 0, 8), 100);
         let root_before = tree.root().unwrap();
         assert!(!tree.slab.get(root_before).is_announced());
-        assert!(wdw(&mut tree, v4(0, 0, 0, 0), 8, 200));
+        assert!(wdw(&mut tree, pfx(0, 0, 0, 0, 8), 200));
         tree.sweep_tombstones(&mut |_| {});
         assert_eq!(
             tree.root(),
@@ -542,9 +517,9 @@ mod tests {
     #[test]
     fn sweep_idempotent() {
         let mut tree = new_tree();
-        ins(&mut tree, v4(10, 0, 0, 0), 8, 100);
-        ins(&mut tree, v4(11, 0, 0, 0), 8, 100);
-        assert!(wdw(&mut tree, v4(10, 0, 0, 0), 8, 200));
+        ins(&mut tree, pfx(10, 0, 0, 0, 8), 100);
+        ins(&mut tree, pfx(11, 0, 0, 0, 8), 100);
+        assert!(wdw(&mut tree, pfx(10, 0, 0, 0, 8), 200));
         tree.sweep_tombstones(&mut |_| {});
         let root_after_first = tree.root();
         let len_after_first = tree.slab.len();
@@ -557,15 +532,13 @@ mod tests {
     fn ipv6_lookup() {
         let mut tree = new_tree();
         let sixty_four = tree.insert(
-            [0x2001_0db8, 0x1234_0000, 0, 0],
-            64,
+            Prefix::new([0x2001_0db8, 0x1234_0000, 0, 0], 64),
             Timestamp::from_millis(100),
             ThinData::default(),
             &mut |_| {},
         );
         let one_twenty_eight = tree.insert(
-            [0x2001_0db8, 0x1234_0000, 0, 1],
-            128,
+            Prefix::new([0x2001_0db8, 0x1234_0000, 0, 1], 128),
             Timestamp::from_millis(100),
             ThinData::default(),
             &mut |_| {},
@@ -588,17 +561,16 @@ mod tests {
         (*seed >> 32) as u32
     }
 
-    fn naive_lpm(prefixes: &[([u32; 4], u32)], addr: [u32; 4]) -> Option<([u32; 4], u32)> {
-        let mut best: Option<([u32; 4], u32)> = None;
-        for &(p, len) in prefixes {
-            let common = common_prefix_len(&p, len, &addr, MAX_PREFIX_LEN);
-            if common == len {
+    fn naive_lpm(prefixes: &[Prefix], addr: [u32; 4]) -> Option<Prefix> {
+        let mut best: Option<Prefix> = None;
+        for &p in prefixes {
+            if p.covers(&addr) {
                 let better = match best {
                     None => true,
-                    Some((_, best_len)) => len > best_len,
+                    Some(b) => p.len > b.len,
                 };
                 if better {
-                    best = Some((p, len));
+                    best = Some(p);
                 }
             }
         }
@@ -608,26 +580,22 @@ mod tests {
     #[test]
     fn oracle_lpm_matches_naive_scan() {
         let mut tree = new_tree();
-        let mut naive: Vec<([u32; 4], u32)> = Vec::new();
+        let mut naive: Vec<Prefix> = Vec::new();
         let mut seed = 0xDEAD_BEEF_CAFE_BABEu64;
 
         for _ in 0..500 {
             let word0 = lcg(&mut seed);
-            let prefix = [word0, 0, 0, 0];
             let prefix_len = 8 + (lcg(&mut seed) % 25);
-            let masked = mask_prefix(prefix, prefix_len);
-            ins(&mut tree, prefix, prefix_len, 100);
-            naive.retain(|&(p, l)| !(p == masked && l == prefix_len));
-            naive.push((masked, prefix_len));
+            let prefix = Prefix::new([word0, 0, 0, 0], prefix_len);
+            ins(&mut tree, prefix, 100);
+            naive.retain(|p| *p != prefix);
+            naive.push(prefix);
         }
 
         for _ in 0..500 {
             let addr = [lcg(&mut seed), 0, 0, 0];
             let expected = naive_lpm(&naive, addr);
-            let actual = tree.lookup(addr).map(|idx| {
-                let n = tree.slab.get(idx);
-                (n.prefix, n.prefix_len)
-            });
+            let actual = tree.lookup(addr).map(|idx| tree.slab.get(idx).prefix);
             assert_eq!(actual, expected, "addr {:?}", addr);
         }
     }
