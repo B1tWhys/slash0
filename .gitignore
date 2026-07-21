@@ -2,3 +2,4 @@
 /crates/shader/target
 /crates/client/dist
 /.claude/settings.local.json
+/.idea/
