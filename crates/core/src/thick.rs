@@ -14,6 +14,14 @@ impl NodeData for ThickData {
     fn set_timestamp(&mut self, ts: Timestamp) {
         self.timestamp = ts;
     }
+    fn apply_announce(&mut self, incoming: &Self, ts: Timestamp) {
+        *self = incoming.clone();
+        self.timestamp = ts;
+    }
+    fn apply_withdraw(&mut self, ts: Timestamp) {
+        *self = Self::default();
+        self.timestamp = ts;
+    }
 }
 
 impl From<&ThickData> for ThinData {

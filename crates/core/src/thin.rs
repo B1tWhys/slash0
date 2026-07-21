@@ -14,6 +14,12 @@ impl NodeData for ThinData {
     fn set_timestamp(&mut self, ts: Timestamp) {
         self.timestamp = ts;
     }
+    fn apply_announce(&mut self, _incoming: &Self, ts: Timestamp) {
+        self.timestamp = ts;
+    }
+    fn apply_withdraw(&mut self, ts: Timestamp) {
+        self.timestamp = ts;
+    }
 }
 
 impl ThinNodeData for ThinData {}
