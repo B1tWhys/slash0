@@ -3,9 +3,19 @@ name = "slash0-shader"
 version = "0.1.0"
 edition = "2024"
 
-# Uncomment when rust-gpu is wired up (also add spirv-std to [dependencies]):
-# [lib]
-# crate-type = ["dylib", "rlib"]
+[lib]
+crate-type = ["rlib", "cdylib"]
 
 [dependencies]
-slash0-core = { path = "../core", default-features = false }
+spirv-std = "0.10.0-alpha.1"
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+
+# spirv-std 0.10.0-alpha.1 declares `glam >= 0.30.8` (permissive, no upper
+# bound). Cargo happily resolves that to glam 0.33.x, but glam 0.33
+# restructured its type re-exports behind feature flags that spirv-std
+# doesn't request, producing "cannot find UVec3 in glam" errors during
+# spirv-std's own compile. Pin glam to the last 0.30 to sidestep that.
+[patch.crates-io]
+glam = { git = "https://github.com/bitshifter/glam-rs", tag = "0.30.10" }

@@ -15,17 +15,71 @@ crates/
 
 Core and server live in the top-level Cargo workspace. Client and shader
 are excluded so their special build stories (wasm target + trunk for the
-client; pinned rust-gpu nightly for the shader) do not leak into
+client; rust-gpu invocation for the shader) do not leak into
 workspace-wide cargo commands.
+
+The whole repo is pinned to a rust-gpu-compatible nightly toolchain
+(currently `nightly-2026-04-11`) via `rust-toolchain.toml`. rust-gpu
+forces the shader crate onto that specific nightly, and running the whole
+repo on the same one avoids toolchain gymnastics between crates.
+
+## Shader pipeline
+
+The shader source lives in `crates/shader/src/lib.rs` as regular Rust
+code, annotated with `#[spirv(vertex)]` and `#[spirv(fragment)]`. It
+goes through the following transformations to end up running on the GPU:
+
+```
+crates/shader/src/lib.rs          (Rust source)
+  |
+  | rust-gpu's rustc_codegen_spirv backend, driven by spirv-builder
+  | from crates/client/build.rs (runs on the nightly-pinned toolchain,
+  | which is why the whole repo is on nightly)
+  v
+slash0_shader.spv                 (Vulkan 1.2 SPIR-V binary)
+  |
+  | naga (as a build-dep of crates/client, still in build.rs):
+  |   naga::front::spv   parses SPIR-V into naga IR
+  |   naga::valid        validates
+  |   naga::back::wgsl   serializes to WGSL text
+  v
+$OUT_DIR/slash0_shader.wgsl       (WGSL text; inspectable)
+  |
+  | include_str!(env!("SLASH0_SHADER_WGSL")) at compile time -
+  | the WGSL string is baked into the wasm binary
+  v
+...ships to the browser as part of the .wasm bundle...
+  |
+  | at page load: wgpu::ShaderSource::Wgsl(...) is handed straight to
+  | GPUDevice.createShaderModule - no in-wasm translation
+  v
+Browser WebGPU (Dawn in Chrome, gecko-webgpu in Firefox) parses WGSL,
+compiles to native GPU code for whatever GPU is present.
+```
+
+Why go through this many steps for what looks like a WGSL shader?
+Because writing shaders in Rust means we can share code with the CPU
+trie (same types, same helpers, same test coverage) once we start doing
+the per-pixel trie walk in the fragment shader. rust-gpu is the only
+piece of that puzzle that has to be at the front; we translate to WGSL
+at build time (rather than at runtime, via naga bundled in the wasm) to
+keep the wasm smaller and turn any translation error into a build error
+instead of a browser runtime error.
+
+First `trunk build` after a fresh checkout takes ~5-10 min because Cargo
+has to compile `rustc_codegen_spirv` (rust-gpu's codegen backend).
+Cached afterwards.
 
 ## One-time setup
 
-For the client:
-
 ```
-rustup target add wasm32-unknown-unknown
 cargo install trunk
 ```
+
+The nightly toolchain plus its components (`rust-src`, `rustc-dev`,
+`llvm-tools`, `rustfmt`, `clippy`) and the `wasm32-unknown-unknown`
+target are pinned in `rust-toolchain.toml`; rustup auto-installs them on
+the first cargo command in the repo.
 
 ## Build / test / lint
 
@@ -113,8 +167,9 @@ Hooks: `no-emoji`, `rustfmt`, `cargo clippy` (workspace), `cargo clippy`
 
 ## Status
 
-Radix trie (announce/withdraw/lookup/sweep with per-mutation dirty tracking)
-is complete on the core. Client renders a solid-color WGSL fragment shader
-to a canvas via wgpu 30 (WebGPU only). Server, wire codec, RIS ingest, and
-rust-gpu integration are not yet started. See `CLAUDE.md` for the
+Radix trie (announce/withdraw/lookup/sweep with per-mutation dirty
+tracking) is complete on the core. Client renders a solid-color fragment
+shader written in Rust via rust-gpu; see the Shader pipeline section for
+what happens between `.rs` and pixels. Server, wire codec, and RIS
+ingest are not yet started. See `CLAUDE.md` for the
 architecture-of-record.

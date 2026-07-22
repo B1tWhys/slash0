@@ -69,8 +69,8 @@ pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
     );
 
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("solid.wgsl"),
-        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/solid.wgsl").into()),
+        label: Some("slash0-shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!(env!("SLASH0_SHADER_WGSL")).into()),
     });
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: None,
