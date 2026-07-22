@@ -1,5 +1,6 @@
 /target
 /crates/shader/target
+/crates/client/target
 /crates/client/dist
 /.claude/settings.local.json
 /.idea/

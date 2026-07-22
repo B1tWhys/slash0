@@ -17,7 +17,7 @@ repos:
         entry: cargo clippy --workspace --all-targets -- -D warnings
         language: system
         pass_filenames: false
-        files: ^(crates/(core|server|client)/.*\.rs|Cargo\.(toml|lock))$
+        files: ^(crates/(core|server)/.*\.rs|Cargo\.(toml|lock))$
 
       - id: clippy-shader
         name: cargo clippy (shader)
@@ -25,3 +25,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^crates/shader/.*\.(rs|toml)$
+
+      - id: clippy-client
+        name: cargo clippy (client)
+        entry: cargo clippy --manifest-path crates/client/Cargo.toml --target wasm32-unknown-unknown --all-targets -- -D warnings
+        language: system
+        pass_filenames: false
+        files: ^crates/client/.*\.(rs|toml)$

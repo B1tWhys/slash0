@@ -3,9 +3,9 @@ resolver = "3"
 members = [
     "crates/core",
     "crates/server",
-    "crates/client",
 ]
 exclude = [
+    "crates/client",
     "crates/shader",
 ]
 
