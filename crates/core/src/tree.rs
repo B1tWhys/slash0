@@ -1,10 +1,23 @@
 use crate::node::{Node, NodeData, NodeFlags, NodeIdx};
 use crate::prefix::{MAX_PREFIX_LEN, Prefix};
-use crate::slab::Slab;
+use crate::slab::{Slab, SlabRead};
 use crate::timestamp::Timestamp;
 use core::marker::PhantomData;
 
-pub struct RadixTree<D: NodeData, S: Slab<Node<D>>> {
+/// Path-compressed binary radix trie keyed on 128-bit prefixes, generic over
+/// the per-node payload `D` and the slab storage `S`.
+///
+/// Nodes live in `S` and reference each other by `NodeIdx` (never pointers)
+/// so the same slab can be memcpy'd wholesale into a GPU buffer for the
+/// shader-side walk. Every mutation ([`insert`](Self::insert),
+/// [`withdraw`](Self::withdraw), [`sweep_tombstones`](Self::sweep_tombstones))
+/// takes a `dirty` callback that reports each slab index whose bytes changed,
+/// giving callers exactly the set of `queue.write_buffer` uploads they need.
+///
+/// Timestamps propagate max-to-root on every announce and withdraw, so
+/// `lookup` and downstream renderers can read "time since any descendant was
+/// touched" from any interior node.
+pub struct RadixTree<D: NodeData, S: SlabRead<Node<D>>> {
     pub slab: S,
     root: Option<NodeIdx>,
     _phantom: PhantomData<D>,
@@ -33,19 +46,82 @@ enum WithdrawOutcome {
     },
 }
 
-impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
+// Read-only operations: available whenever the storage supports random reads
+// (`SlabRead`). This is the surface a GPU-side implementation of the trie
+// walk needs, and it's the only surface the shader can support since it
+// cannot allocate.
+impl<D: NodeData, S: SlabRead<Node<D>>> RadixTree<D, S> {
+    /// Wraps the given slab as an empty tree (`root = None`). Callers with a
+    /// mutation-capable slab use this to bootstrap; shader-side readers use
+    /// [`with_root`](Self::with_root) instead, since they can't grow the
+    /// tree and instead need to attach to a pre-populated slab + root.
     pub fn new(slab: S) -> Self {
+        Self::with_root(slab, None)
+    }
+
+    /// Wraps a slab with an existing root index. This is the constructor
+    /// used shader-side, where the slab bytes and the root are uploaded from
+    /// the CPU and the shader only walks them.
+    pub fn with_root(slab: S, root: Option<NodeIdx>) -> Self {
         Self {
             slab,
-            root: None,
+            root,
             _phantom: PhantomData,
         }
     }
 
+    /// Returns the slab index of the root node, or `None` if the tree is
+    /// empty. Callers that memcpy the slab to the GPU need this to tell the
+    /// shader where to start walking.
     pub fn root(&self) -> Option<NodeIdx> {
         self.root
     }
 
+    /// Longest-prefix-match lookup: returns the slab index of the deepest
+    /// currently-announced node whose prefix covers `addr`, or `None` if no
+    /// announced prefix covers it.
+    ///
+    /// Unannounced structural nodes (path-compression splits and withdrawn
+    /// nodes pending sweep) are traversed but never returned.
+    pub fn lookup(&self, addr: [u32; 4]) -> Option<NodeIdx> {
+        self.lookup_recursive(self.root?, addr)
+    }
+
+    fn lookup_recursive(&self, subroot: NodeIdx, addr: [u32; 4]) -> Option<NodeIdx> {
+        let node = self.slab.get(subroot);
+        if !node.prefix.covers(&addr) {
+            return None;
+        }
+        // Prefer any deeper announced descendant over this level.
+        let deeper = if node.prefix.len < MAX_PREFIX_LEN {
+            let bit = crate::prefix::bit_at(&addr, node.prefix.len) as usize;
+            node.children[bit].and_then(|c| self.lookup_recursive(c, addr))
+        } else {
+            None
+        };
+        deeper.or_else(|| node.is_announced().then_some(subroot))
+    }
+}
+
+// Mutation operations: require the full `Slab` trait (`alloc` / `free` /
+// `get_mut`). Unavailable on shader-side storage that only implements
+// `SlabRead`.
+impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
+    /// Announces `prefix` with `data` at timestamp `ts`, returning the slab
+    /// index of the target node.
+    ///
+    /// May restructure the tree by splitting an existing node or splicing a
+    /// new ancestor above one. The target node's `ANNOUNCED` flag is set and
+    /// `data.apply_announce(&incoming, ts)` is invoked on it. `ts` is then
+    /// propagated max-to-root through the target's ancestors, stopping at the
+    /// first ancestor whose timestamp already dominates.
+    ///
+    /// The `dirty` callback fires for every slab index whose bytes changed:
+    /// the target, any structural nodes created by the split/promotion, any
+    /// existing node whose child pointer was rewired, and any ancestor whose
+    /// timestamp advanced. Each affected index is emitted exactly once.
+    ///
+    /// Panics if the underlying slab cannot allocate.
     pub fn insert(
         &mut self,
         prefix: Prefix,
@@ -181,6 +257,20 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         }
     }
 
+    /// Withdraws the exact-match `prefix` at timestamp `ts`, returning `true`
+    /// iff the prefix was previously announced.
+    ///
+    /// Clears the target's `ANNOUNCED` flag and invokes
+    /// `data.apply_withdraw(ts)` on it. `ts` is then propagated max-to-root
+    /// through the target's ancestors. The target node's slab slot is *not*
+    /// freed here — reclamation is deferred to
+    /// [`sweep_tombstones`](Self::sweep_tombstones) so the GPU's in-flight
+    /// snapshot can't follow a recycled index into an unrelated subtree.
+    ///
+    /// Returns `false` (with no `dirty` emissions and no state change) when
+    /// the prefix isn't in the tree or is present but not currently
+    /// announced. `dirty` fires for the target and each ancestor whose
+    /// timestamp advanced.
     pub fn withdraw(
         &mut self,
         prefix: Prefix,
@@ -278,25 +368,20 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         idx
     }
 
-    pub fn lookup(&self, addr: [u32; 4]) -> Option<NodeIdx> {
-        self.lookup_recursive(self.root?, addr)
-    }
-
-    fn lookup_recursive(&self, subroot: NodeIdx, addr: [u32; 4]) -> Option<NodeIdx> {
-        let node = self.slab.get(subroot);
-        if !node.prefix.covers(&addr) {
-            return None;
-        }
-        // Prefer any deeper announced descendant over this level.
-        let deeper = if node.prefix.len < MAX_PREFIX_LEN {
-            let bit = crate::prefix::bit_at(&addr, node.prefix.len) as usize;
-            node.children[bit].and_then(|c| self.lookup_recursive(c, addr))
-        } else {
-            None
-        };
-        deeper.or_else(|| node.is_announced().then_some(subroot))
-    }
-
+    /// Reclaims slab slots that are no longer contributing to the tree.
+    /// Meant to run at a frame boundary — never during a frame — so the GPU's
+    /// current-frame slab snapshot cannot follow a recycled index into an
+    /// unrelated subtree.
+    ///
+    /// Post-order pass: a non-announced node is collapsed if it has zero or
+    /// one child (the child, if any, is spliced up into the parent's slot),
+    /// and kept if it has two (it remains a pure topology split). This
+    /// treats withdrawn-and-tombstoned nodes and never-announced split nodes
+    /// uniformly, so a split that becomes redundant after a subtree is
+    /// swept away also gets collapsed in the same pass.
+    ///
+    /// `dirty` fires for each parent whose child pointer changed; the freed
+    /// slot itself is not emitted (nothing in the live tree references it).
     pub fn sweep_tombstones(&mut self, dirty: &mut impl FnMut(NodeIdx)) {
         let Some(root) = self.root else { return };
         self.sweep_recursive(root, None, dirty);
