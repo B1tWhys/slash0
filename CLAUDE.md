@@ -39,7 +39,7 @@ Implementation has not started yet -- this file records the architecture that ha
 ### Rendering
 
 - Fragment shader does a per-pixel radix trie walk. Color reflects the propagated timestamp on whichever node's Hilbert cell contains the pixel.
-- Hilbert curve is **fixed-order-128**, always, for both v4 and v6. The CPU sends a viewport rectangle in Hilbert 2D space as a uniform; the shader does inverse-Hilbert per pixel.
+- Hilbert curve is **fixed-order-64** (64 subdivision levels over the 128-bit address space, a `2^64 x 2^64` grid), always, for both v4 and v6. The CPU sends a viewport rectangle in Hilbert 2D space as a uniform; the shader does inverse-Hilbert per pixel.
 - Zoom range spans `/0` all the way to `/128`. The whole trie fits in client memory (~1M v4 prefixes, ~200k v6), so there is no tile-fetching plumbing -- the shader just clips to the viewport.
 - Hilbert math is currently GPU-only. UX features (jump-to-prefix, click-to-inspect, prefix highlight) will pull it back to CPU later. Write the shared Hilbert function so it is reusable from Rust CPU code from day one, even though only the shader consumes it initially.
 - Shader written via `rust-gpu`. The `NodeData` monomorphization the shader sees (`ThinData`) must contain only shader-representable fields -- u32s, arrays of u32, no `Option`, no payload enums.
