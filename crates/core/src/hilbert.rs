@@ -15,10 +15,10 @@
 //!
 //! # Bit conventions
 //!
-//! IP addresses use the crate-wide `[u32; 4]` layout from [`crate::prefix`]:
-//! big-endian, with the most significant bit in bit 0 of word 0. A 2D point's
-//! axes follow the same convention in `[u32; 2]`, so the coarsest Hilbert
-//! subdivision corresponds to the most significant axis bit.
+//! IP addresses are the crate-wide [`Address`] (`[u32; 4]`, big-endian, most
+//! significant bit in bit 0 of word 0). A 2D point's axes follow the same
+//! convention in `[u32; 2]`, so the coarsest Hilbert subdivision corresponds to
+//! the most significant axis bit.
 //!
 //! The transform is the canonical iterative Hilbert algorithm. Because each of
 //! the 64 levels touches exactly one bit per axis and two bits of the index,
@@ -26,11 +26,13 @@
 //! axis/index bit is a bit-set, and the rotate/reflect step `x = 2^k - 1 - x`
 //! (with `x < 2^k`) is exactly `x ^= 2^k - 1` (complement the low `k` bits).
 
+use crate::prefix::Address;
+
 /// A point in Hilbert 2D space.
 ///
 /// Each axis is 64 bits stored big-endian in `[u32; 2]` (most significant bit
-/// in bit 0 of word 0), matching the [`crate::prefix`] address layout. Laid out
-/// `#[repr(C)]` so it can embed in shader-visible structs and uniforms.
+/// in bit 0 of word 0), matching the [`Address`] layout. Laid out `#[repr(C)]`
+/// so it can embed in shader-visible structs and uniforms.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct HilbertPoint {
@@ -50,15 +52,17 @@ const LEVELS: u32 = 64;
 ///
 /// ```
 /// use slash0_core::hilbert::{ip_to_point, point_to_ip, HilbertPoint};
+/// use slash0_core::prefix::Address;
 ///
 /// // The all-zero address sits at the curve's origin.
-/// assert_eq!(ip_to_point([0, 0, 0, 0]), HilbertPoint::default());
+/// assert_eq!(ip_to_point(Address([0, 0, 0, 0])), HilbertPoint::default());
 ///
 /// // Every address round-trips through its 2D point.
-/// let ip = [0x2001_0db8, 0, 0, 0x0000_0001];
+/// let ip = Address([0x2001_0db8, 0, 0, 0x0000_0001]);
 /// assert_eq!(point_to_ip(ip_to_point(ip)), ip);
 /// ```
-pub fn ip_to_point(ip: [u32; 4]) -> HilbertPoint {
+pub fn ip_to_point(ip: Address) -> HilbertPoint {
+    let ip = ip.0;
     let mut x = [0u32; 2];
     let mut y = [0u32; 2];
 
@@ -96,13 +100,14 @@ pub fn ip_to_point(ip: [u32; 4]) -> HilbertPoint {
 ///
 /// ```
 /// use slash0_core::hilbert::{ip_to_point, point_to_ip, HilbertPoint};
+/// use slash0_core::prefix::Address;
 ///
-/// assert_eq!(point_to_ip(HilbertPoint::default()), [0, 0, 0, 0]);
+/// assert_eq!(point_to_ip(HilbertPoint::default()), Address([0, 0, 0, 0]));
 ///
-/// let point = ip_to_point([0, 0, 0, 42]);
-/// assert_eq!(point_to_ip(point), [0, 0, 0, 42]);
+/// let point = ip_to_point(Address([0, 0, 0, 42]));
+/// assert_eq!(point_to_ip(point), Address([0, 0, 0, 42]));
 /// ```
-pub fn point_to_ip(point: HilbertPoint) -> [u32; 4] {
+pub fn point_to_ip(point: HilbertPoint) -> Address {
     let mut x = point.x;
     let mut y = point.y;
     let mut ip = [0u32; 4];
@@ -132,7 +137,7 @@ pub fn point_to_ip(point: HilbertPoint) -> [u32; 4] {
         }
     }
 
-    ip
+    Address(ip)
 }
 
 /// Returns bit `bit` (0 = least significant) of the 128-bit index, viewing the
@@ -260,13 +265,13 @@ mod tests {
 
     #[test]
     fn zero_maps_to_origin() {
-        assert_eq!(ip_to_point([0; 4]), HilbertPoint::default());
-        assert_eq!(point_to_ip(HilbertPoint::default()), [0; 4]);
+        assert_eq!(ip_to_point(Address([0; 4])), HilbertPoint::default());
+        assert_eq!(point_to_ip(HilbertPoint::default()), Address([0; 4]));
     }
 
     #[test]
     fn all_ones_round_trips() {
-        let ip = [u32::MAX; 4];
+        let ip = Address([u32::MAX; 4]);
         assert_eq!(point_to_ip(ip_to_point(ip)), ip);
     }
 
@@ -274,7 +279,7 @@ mod tests {
     fn round_trips_over_random_ips() {
         let mut seed = 0xDEAD_BEEF_CAFE_BABE_u64;
         for _ in 0..500 {
-            let ip = random_ip(&mut seed);
+            let ip = Address(random_ip(&mut seed));
             assert_eq!(point_to_ip(ip_to_point(ip)), ip);
         }
     }
@@ -309,12 +314,15 @@ mod tests {
         let mut seed = 0xDEAD_BEEF_CAFE_BABE_u64;
         for _ in 0..500 {
             let ip = random_ip(&mut seed);
-            assert_eq!(axes(ip_to_point(ip)), oracle_d2xy(index_to_u128(ip)));
+            assert_eq!(
+                axes(ip_to_point(Address(ip))),
+                oracle_d2xy(index_to_u128(ip))
+            );
 
             let x = ((lcg(&mut seed) as u64) << 32) | lcg(&mut seed) as u64;
             let y = ((lcg(&mut seed) as u64) << 32) | lcg(&mut seed) as u64;
             assert_eq!(
-                index_to_u128(point_to_ip(point_from_axes(x, y))),
+                index_to_u128(point_to_ip(point_from_axes(x, y)).0),
                 oracle_xy2d(x, y)
             );
         }
@@ -326,8 +334,8 @@ mod tests {
         // neighbours (Manhattan distance 1). Catches bit-ordering and
         // reflection-table mistakes that round-tripping alone would miss.
         for d in 0u128..2000 {
-            let a = ip_to_point(u128_to_index(d));
-            let b = ip_to_point(u128_to_index(d + 1));
+            let a = ip_to_point(Address(u128_to_index(d)));
+            let b = ip_to_point(Address(u128_to_index(d + 1)));
             assert_eq!(manhattan(a, b), 1, "d = {d}");
         }
 
@@ -335,8 +343,8 @@ mod tests {
         for _ in 0..500 {
             // Clear the top bit so `d + 1` cannot overflow the 128-bit space.
             let d = index_to_u128(random_ip(&mut seed)) & ((1u128 << 127) - 1);
-            let a = ip_to_point(u128_to_index(d));
-            let b = ip_to_point(u128_to_index(d + 1));
+            let a = ip_to_point(Address(u128_to_index(d)));
+            let b = ip_to_point(Address(u128_to_index(d + 1)));
             assert_eq!(manhattan(a, b), 1, "d = {d}");
         }
     }
@@ -345,9 +353,10 @@ mod tests {
     fn word_boundary_bits_round_trip() {
         for pos in [0u32, 1, 31, 32, 33, 63, 64, 95, 96, 127] {
             let mut ip = [0u32; 4];
-            // Set the bit at MSB-indexed position `pos`, matching prefix::bit_at.
+            // Set the bit at MSB-indexed position `pos`, matching Address::bit_at.
             ip[(pos / 32) as usize] |= 0x8000_0000u32 >> (pos % 32);
-            assert_eq!(point_to_ip(ip_to_point(ip)), ip, "pos = {pos}");
+            let addr = Address(ip);
+            assert_eq!(point_to_ip(ip_to_point(addr)), addr, "pos = {pos}");
         }
     }
 }

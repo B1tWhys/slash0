@@ -39,7 +39,7 @@ pub fn fs_main(uv: Vec2, out_color: &mut Vec4) {
     });
 
     // Fraction along the curve: word 0 holds the top of the distance.
-    let distance = ip[0] as f32 / 4_294_967_296.0; // 2^32
+    let distance = ip.0[0] as f32 / 4_294_967_296.0; // 2^32
 
     // Sweep the hue several times over the full curve so Hilbert locality shows
     // up as tight, fast-repeating bands rather than one slow gradient.

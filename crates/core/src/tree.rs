@@ -1,5 +1,5 @@
 use crate::node::{Node, NodeData, NodeFlags, NodeIdx};
-use crate::prefix::{MAX_PREFIX_LEN, Prefix};
+use crate::prefix::{Address, MAX_PREFIX_LEN, Prefix};
 use crate::slab::{Slab, SlabRead};
 use crate::timestamp::Timestamp;
 use core::marker::PhantomData;
@@ -83,18 +83,18 @@ impl<D: NodeData, S: SlabRead<Node<D>>> RadixTree<D, S> {
     ///
     /// Unannounced structural nodes (path-compression splits and withdrawn
     /// nodes pending sweep) are traversed but never returned.
-    pub fn lookup(&self, addr: [u32; 4]) -> Option<NodeIdx> {
+    pub fn lookup(&self, addr: Address) -> Option<NodeIdx> {
         self.lookup_recursive(self.root?, addr)
     }
 
-    fn lookup_recursive(&self, subroot: NodeIdx, addr: [u32; 4]) -> Option<NodeIdx> {
+    fn lookup_recursive(&self, subroot: NodeIdx, addr: Address) -> Option<NodeIdx> {
         let node = self.slab.get(subroot);
-        if !node.prefix.covers(&addr) {
+        if !node.prefix.covers(addr) {
             return None;
         }
         // Prefer any deeper announced descendant over this level.
         let deeper = if node.prefix.len < MAX_PREFIX_LEN {
-            let bit = crate::prefix::bit_at(&addr, node.prefix.len) as usize;
+            let bit = addr.bit_at(node.prefix.len) as usize;
             node.children[bit].and_then(|c| self.lookup_recursive(c, addr))
         } else {
             None
@@ -464,14 +464,14 @@ mod tests {
         RadixTree::new(VecSlab::new())
     }
 
-    fn addr(dotted: &str) -> [u32; 4] {
+    fn addr(dotted: &str) -> Address {
         let ip: core::net::Ipv4Addr = dotted.parse().expect("valid IPv4 dotted-decimal");
-        [u32::from_be_bytes(ip.octets()), 0, 0, 0]
+        Address([u32::from_be_bytes(ip.octets()), 0, 0, 0])
     }
 
     fn v4(cidr: &str) -> Prefix {
         let (addr_str, len_str) = cidr.split_once('/').expect("CIDR notation like 10.0.0.0/8");
-        let bits = addr(addr_str);
+        let bits = addr(addr_str).0;
         let len: u32 = len_str.parse().expect("valid prefix length");
         Prefix::new(bits, len)
     }
@@ -788,14 +788,14 @@ mod tests {
             100,
         );
         assert_eq!(
-            tree.lookup([0x2001_0db8, 0x1234_0000, 0, 1]),
+            tree.lookup(Address([0x2001_0db8, 0x1234_0000, 0, 1])),
             Some(one_twenty_eight)
         );
         assert_eq!(
-            tree.lookup([0x2001_0db8, 0x1234_0000, 0, 0xDEAD_BEEF]),
+            tree.lookup(Address([0x2001_0db8, 0x1234_0000, 0, 0xDEAD_BEEF])),
             Some(sixty_four)
         );
-        assert_eq!(tree.lookup([0x2001_0db8, 0xFFFF_0000, 0, 0]), None);
+        assert_eq!(tree.lookup(Address([0x2001_0db8, 0xFFFF_0000, 0, 0])), None);
     }
 
     fn lcg(seed: &mut u64) -> u32 {
@@ -805,10 +805,10 @@ mod tests {
         (*seed >> 32) as u32
     }
 
-    fn naive_lpm(prefixes: &[Prefix], addr: [u32; 4]) -> Option<Prefix> {
+    fn naive_lpm(prefixes: &[Prefix], addr: Address) -> Option<Prefix> {
         let mut best: Option<Prefix> = None;
         for &p in prefixes {
-            if p.covers(&addr) {
+            if p.covers(addr) {
                 let better = match best {
                     None => true,
                     Some(b) => p.len > b.len,
@@ -837,7 +837,7 @@ mod tests {
         }
 
         for _ in 0..500 {
-            let addr = [lcg(&mut seed), 0, 0, 0];
+            let addr = Address([lcg(&mut seed), 0, 0, 0]);
             let expected = naive_lpm(&naive, addr);
             let actual = tree.lookup(addr).map(|idx| tree.slab.get(idx).prefix);
             assert_eq!(actual, expected, "addr {:?}", addr);
