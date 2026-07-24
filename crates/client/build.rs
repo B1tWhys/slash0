@@ -32,5 +32,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo::rustc-env=SLASH0_SHADER_WGSL={}", wgsl_path.display());
     println!("cargo::rerun-if-changed=../shader/src/lib.rs");
     println!("cargo::rerun-if-changed=../shader/Cargo.toml");
+    // The shader now pulls Hilbert math from slash0-core; regen WGSL when it moves.
+    println!("cargo::rerun-if-changed=../core/src");
     Ok(())
 }

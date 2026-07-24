@@ -8,6 +8,8 @@ crate-type = ["rlib", "cdylib"]
 
 [dependencies]
 spirv-std = "0.10.0-alpha.1"
+# no_std, no alloc: the shader only needs the D-agnostic bit math (hilbert).
+slash0-core = { path = "../core", default-features = false }
 
 [lints.rust]
 unexpected_cfgs = { level = "allow", check-cfg = ['cfg(target_arch, values("spirv"))'] }
