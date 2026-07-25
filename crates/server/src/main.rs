@@ -1,5 +1,8 @@
 mod config;
 mod http;
+// RIS Live client is built but not yet wired into ingest.
+#[allow(dead_code)]
+mod ris_client;
 
 use std::path::PathBuf;
 
