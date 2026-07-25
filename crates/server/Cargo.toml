@@ -2,6 +2,7 @@
 name = "slash0-server"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [dependencies]
 anyhow = "1.0.104"

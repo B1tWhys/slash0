@@ -66,7 +66,8 @@ at build time (rather than at runtime, via naga bundled in the wasm) to
 keep the wasm smaller and turn any translation error into a build error
 instead of a browser runtime error.
 
-First `trunk build` after a fresh checkout takes ~5-10 min because Cargo
+First `trunk build` after a fresh checkout (including the first `cargo
+build` of the server, which drives trunk) takes ~5-10 min because Cargo
 has to compile `rustc_codegen_spirv` (rust-gpu's codegen backend).
 Cached afterwards.
 
@@ -91,18 +92,16 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+Building the server runs `trunk build` for the client (and, through the
+client's build script, the shader) via `crates/server/build.rs`. So any
+command that compiles the server also rebuilds the client bundle when its
+sources change, which makes `trunk` a build-time requirement for the server.
+
 Verify core's no-alloc feature slice compiles (this is what the shader will
 see):
 
 ```
 cargo build -p slash0-core --no-default-features
-```
-
-Client crate (excluded from workspace, wasm target):
-
-```
-cd crates/client
-trunk build
 ```
 
 Shader crate (excluded from workspace):
@@ -113,22 +112,25 @@ cargo check --manifest-path crates/shader/Cargo.toml
 
 ## Run
 
-Server (currently just a stub main):
+The server builds the client + shader (via its build script) and serves the
+whole app, so one command brings up everything. From the workspace root:
 
 ```
-cargo run -p slash0-server
+cargo serve        # alias for `cargo run -p slash0-server`
 ```
 
-Client:
+Then open http://127.0.0.1:3000 in a WebGPU-capable browser (Chrome/Edge
+113+, Safari 18+). The listen address and served asset directory are
+configurable: copy `config/server.example.yaml` to `config/server.yaml` to
+override the defaults, or pass `--config <path>`.
+
+For standalone client work with autoreload (the shader is a static render
+for now, so no server is needed to see it):
 
 ```
 cd crates/client
-trunk build
-python3 -m http.server --directory dist 8080
+trunk serve
 ```
-
-Then open http://localhost:8080 in a WebGPU-capable browser
-(Chrome/Edge 113+, Safari 18+).
 
 Firefox does not ship WebGPU enabled by default yet. To enable it, open
 `about:config`, accept the warning, search for `dom.webgpu.enabled`, and
@@ -170,6 +172,7 @@ Hooks: `no-emoji`, `rustfmt`, `cargo clippy` (workspace), `cargo clippy`
 Radix trie (announce/withdraw/lookup/sweep with per-mutation dirty
 tracking) is complete on the core. Client renders a solid-color fragment
 shader written in Rust via rust-gpu; see the Shader pipeline section for
-what happens between `.rs` and pixels. Server, wire codec, and RIS
-ingest are not yet started. See `CLAUDE.md` for the
-architecture-of-record.
+what happens between `.rs` and pixels. The server has its HTTP/WebSocket
+scaffolding (axum static client serving, `/api`, a `/ws` upgrade stub,
+figment config, graceful shutdown); the wire codec and RIS ingest are not
+yet started. See `CLAUDE.md` for the architecture-of-record.

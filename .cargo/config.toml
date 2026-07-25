@@ -1,0 +1,2 @@
+[alias]
+serve = "run -p slash0-server"
