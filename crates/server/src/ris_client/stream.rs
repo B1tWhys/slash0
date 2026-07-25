@@ -4,7 +4,7 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::io::StreamReader;
 use tracing::{debug, info, warn};
 
-use crate::ris_client::messages::{RisMessage, ServerMessage, SubscriptionFilters};
+use crate::ris_client::messages::{RisMessage, RisMessageBody, ServerMessage, SubscriptionFilters};
 
 /// RIS Live newline-delimited JSON streaming endpoint.
 const RIS_LIVE_STREAM_URL: &str = "https://ris-live.ripe.net/v1/stream/?format=json";
@@ -55,6 +55,7 @@ pub async fn subscribe(
 
             match serde_json::from_str::<ServerMessage>(&record) {
                 Ok(ServerMessage::RisMessage(message)) => {
+                    record_metrics(&message);
                     // A send error only means no receivers are currently
                     // attached; consumers may subscribe later, so keep ingesting.
                     let _ = ingest_tx.send(message);
@@ -70,4 +71,26 @@ pub async fn subscribe(
     });
 
     Ok(tx)
+}
+
+/// Counts every relayed message, plus the announced and withdrawn prefixes
+/// carried by UPDATEs. Counting prefixes rather than messages matches the trie
+/// granularity: each prefix is one update to apply. Rates are derived downstream
+/// (e.g. `rate()` in Prometheus). Zero-valued increments keep every series
+/// present from the first message.
+fn record_metrics(message: &RisMessage) {
+    metrics::counter!("slash0_ris_messages_total").increment(1);
+
+    if let RisMessageBody::Update(update) = &message.body {
+        let announced: usize = update
+            .announcements
+            .iter()
+            .flatten()
+            .map(|announcement| announcement.prefixes.len())
+            .sum();
+        let withdrawn = update.withdrawals.iter().flatten().count();
+
+        metrics::counter!("slash0_ris_announcements_total").increment(announced as u64);
+        metrics::counter!("slash0_ris_withdrawals_total").increment(withdrawn as u64);
+    }
 }
