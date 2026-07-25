@@ -1,0 +1,17 @@
+# slash0 server configuration.
+#
+# Every value below is also the built-in default, so this file is optional:
+# with no config present the server runs on these settings. Copy this to
+# config/server.yaml (the path used when --config is omitted) or point at it
+# explicitly with `--config path/to/file.yaml`, then edit what you need.
+
+server:
+  host: 127.0.0.1
+  port: 3000
+  # Directory served for non-API, non-websocket requests. Relative to the
+  # working directory (the workspace root under `cargo run`).
+  assets_dir: crates/client/dist
+
+logging:
+  # tracing EnvFilter directive.
+  filter: "info,slash0=debug,tower_http=debug"
