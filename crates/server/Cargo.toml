@@ -12,11 +12,12 @@ clap = { version = "4.6.4", features = ["derive"] }
 figment = { version = "0.10.19", features = ["yaml"] }
 futures = "0.3.33"
 metrics = "0.24.6"
+metrics-exporter-prometheus = { version = "0.17", default-features = false }
 reqwest = { version = "0.13.4", default-features = false, features = ["stream", "rustls", "charset", "http2"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 slash0-core = { workspace = true, features = ["alloc", "thick", "serde", "parse"] }
-tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "net", "signal", "sync", "time"] }
 tokio-util = { version = "0.7.19", features = ["codec", "io"] }
 tower = "0.5.3"
 tower-http = { version = "0.7.0", features = ["fs", "trace"] }

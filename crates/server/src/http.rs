@@ -3,6 +3,7 @@ use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use axum::routing::{any, get};
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Serialize;
 use tower::ServiceBuilder;
 use tower_http::services::ServeDir;
@@ -16,9 +17,13 @@ use crate::config::Config;
 /// nested `/api` router so future query endpoints stay grouped, and the
 /// websocket gets its own top-level route. `ServiceBuilder` holds a single
 /// layer today but is where request-wide middleware (CORS, timeouts) will go.
-pub fn router(config: &Config) -> Router {
+pub fn router(config: &Config, metrics_handle: PrometheusHandle) -> Router {
     Router::new()
         .route("/ws", any(ws_handler))
+        .route(
+            "/metrics",
+            get(move || async move { metrics_handle.render() }),
+        )
         .nest("/api", api_router())
         .fallback_service(ServeDir::new(&config.server.assets_dir))
         .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))

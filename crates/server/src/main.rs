@@ -10,9 +10,11 @@ mod ris_client;
 mod route_table;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::Context;
 use clap::Parser;
+use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -35,6 +37,22 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load(cli.config)?;
     init_tracing(&config.logging)?;
 
+    let metrics_handle = PrometheusBuilder::new()
+        .install_recorder()
+        .context("failed to install Prometheus recorder")?;
+    // install_recorder() does not spawn upkeep the way install() does, so drive
+    // it ourselves to keep the recorder's state bounded over time.
+    tokio::spawn({
+        let handle = metrics_handle.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                handle.run_upkeep();
+            }
+        }
+    });
+
     let ris = ris_client::stream::subscribe(SubscriptionFilters {
         host: Some(config.ris.host.clone()),
         message_type: Some(BgpMessageType::Update),
@@ -48,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     info!(host = %config.ris.host, "ingesting RIS Live updates");
 
     let addr = config.server.socket_addr();
-    let app = http::router(&config);
+    let app = http::router(&config, metrics_handle);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
