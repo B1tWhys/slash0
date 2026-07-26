@@ -2,9 +2,11 @@ use crate::node::NodeIdx;
 
 pub trait SlabRead<T> {
     fn get(&self, idx: NodeIdx) -> &T;
+    /// Number of items currently allocated in the slab. Excludes both the
+    /// reserved zero index and any slots that have been freed back to the pool.
     fn len(&self) -> u32;
     fn is_empty(&self) -> bool {
-        self.len() <= 1
+        self.len() == 0
     }
 }
 
@@ -55,7 +57,10 @@ mod vec_backed {
             &self.entries[idx.get() as usize]
         }
         fn len(&self) -> u32 {
-            self.entries.len() as u32
+            // `entries` carries the reserved zero slot and never shrinks, so the
+            // live count is the backing length minus that slot and everything
+            // currently parked on the free list.
+            (self.entries.len() - 1 - self.free_list.len()) as u32
         }
     }
 
@@ -159,14 +164,34 @@ mod tests {
 
         let mut clone = original.clone();
 
-        // Zeroing every entry in the clone must not disturb the original.
-        for i in 1..clone.len() {
+        // Zeroing every entry in the clone must not disturb the original. No
+        // slots were freed, so the live indices are 1..=len contiguously.
+        for i in 1..=clone.len() {
             *clone.get_mut(idx(i)) = 0;
         }
 
-        for i in 1..original.len() {
+        for i in 1..=original.len() {
             assert_eq!(*original.get(idx(i)), i);
         }
+    }
+
+    #[test]
+    fn len_counts_live_allocations_not_freed_slots() {
+        let mut slab = VecSlab::<u32>::new();
+        assert_eq!(slab.len(), 0);
+        assert!(slab.is_empty());
+
+        let a = slab.alloc().unwrap();
+        let b = slab.alloc().unwrap();
+        let _c = slab.alloc().unwrap();
+        assert_eq!(slab.len(), 3);
+
+        slab.free(a);
+        slab.free(b);
+        assert_eq!(slab.len(), 1, "freed slots drop out of the count");
+
+        slab.alloc().unwrap();
+        assert_eq!(slab.len(), 2, "reallocating a freed slot counts again");
     }
 
     #[test]
