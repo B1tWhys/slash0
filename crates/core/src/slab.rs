@@ -20,6 +20,7 @@ mod vec_backed {
     use alloc::vec::Vec;
     use core::num::NonZeroU32;
 
+    #[derive(Clone)]
     pub struct VecSlab<T> {
         entries: Vec<T>,
         free_list: Vec<NodeIdx>,
@@ -145,6 +146,26 @@ mod tests {
         }
         for (idx, expected) in handles {
             assert_eq!(*slab.get(idx), expected);
+        }
+    }
+
+    #[test]
+    fn clone_is_an_independent_deep_copy() {
+        let mut original = VecSlab::<u32>::new();
+        for _ in 0..16 {
+            let idx = original.alloc().unwrap();
+            *original.get_mut(idx) = idx.get();
+        }
+
+        let mut clone = original.clone();
+
+        // Zeroing every entry in the clone must not disturb the original.
+        for i in 1..clone.len() {
+            *clone.get_mut(idx(i)) = 0;
+        }
+
+        for i in 1..original.len() {
+            assert_eq!(*original.get(idx(i)), i);
         }
     }
 
