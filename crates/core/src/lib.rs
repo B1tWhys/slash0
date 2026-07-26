@@ -10,7 +10,6 @@ pub mod slab;
 pub mod thin;
 pub mod timestamp;
 pub mod tree;
-pub mod wire;
 
 #[cfg(feature = "thick")]
 pub mod thick;

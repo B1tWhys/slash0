@@ -8,7 +8,11 @@ default = ["alloc"]
 alloc = []
 thick = ["alloc"]
 serde = ["dep:serde"]
+# CIDR-string parsing on the CPU. Pulls in a data-carrying error enum that
+# rust-gpu can't lower, so the shader (default-features = false) leaves it off.
+parse = ["dep:thiserror"]
 
 [dependencies]
 bitflags = { version = "2", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+thiserror = { version = "2.0.19", default-features = false, optional = true }

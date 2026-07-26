@@ -8,8 +8,8 @@
 //! rust-gpu shader's per-pixel walk all navigate this representation, so the
 //! bit-poking primitives live on `Address` rather than in any one consumer.
 //!
-//! Higher-level concerns (CIDR parsing, wire formats) live in their own
-//! modules; this one is just the address/prefix key types and their bit math.
+//! This module also owns the address-family tag ([`IpVersion`]) and, behind the
+//! `parse` feature, CIDR-string parsing ([`Prefix::parse_cidr`]).
 
 /// Maximum prefix length in bits, sized for IPv6.
 ///
@@ -17,6 +17,19 @@
 /// clamp or validate lengths against this constant when accepting external
 /// input.
 pub const MAX_PREFIX_LEN: u32 = 128;
+
+/// Which IP address family a [`Prefix`] belongs to.
+///
+/// Kept out of the trie node payload — the trie is family-agnostic — but needed
+/// by consumers that maintain separate v4/v6 tries and by any wire encoding. The
+/// discriminants match the IP version numbers so the tag can serialize directly.
+#[derive(Copy, Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[repr(u8)]
+pub enum IpVersion {
+    V4 = 4,
+    V6 = 6,
+}
 
 /// A 128-bit IP address: a big-endian `[u32; 4]` key with the most significant
 /// bit in bit 0 of word 0.
@@ -221,6 +234,62 @@ impl Prefix {
     }
 }
 
+/// Why a CIDR string could not be parsed into a [`Prefix`].
+#[cfg(feature = "parse")]
+#[derive(Debug, thiserror::Error)]
+pub enum CidrParseError {
+    #[error("missing '/' length separator")]
+    MissingSeparator,
+    #[error("invalid IP address")]
+    Address(#[from] core::net::AddrParseError),
+    #[error("invalid prefix length")]
+    Length(#[from] core::num::ParseIntError),
+    #[error("prefix length {len} exceeds the {max}-bit maximum for its address family")]
+    LengthTooLong { len: u32, max: u32 },
+}
+
+#[cfg(feature = "parse")]
+impl Prefix {
+    /// Parses a CIDR string (e.g. `192.0.2.0/24`, `2001:db8::/32`) into the
+    /// address family it belongs to and the canonical prefix.
+    ///
+    /// The family is taken from the parsed address itself. Host bits past the
+    /// length are masked off (so `10.1.2.3/8` canonicalizes to `10.0.0.0/8`),
+    /// and the length is validated against the family maximum (32 for IPv4, 128
+    /// for IPv6) before construction.
+    pub fn parse_cidr(cidr: &str) -> Result<(IpVersion, Prefix), CidrParseError> {
+        use core::net::IpAddr;
+
+        let (addr, len) = cidr
+            .split_once('/')
+            .ok_or(CidrParseError::MissingSeparator)?;
+        let addr: IpAddr = addr.parse()?;
+        let len: u32 = len.parse()?;
+
+        match addr {
+            IpAddr::V4(addr) => {
+                if len > 32 {
+                    return Err(CidrParseError::LengthTooLong { len, max: 32 });
+                }
+                Ok((IpVersion::V4, Prefix::new([addr.to_bits(), 0, 0, 0], len)))
+            }
+            IpAddr::V6(addr) => {
+                if len > 128 {
+                    return Err(CidrParseError::LengthTooLong { len, max: 128 });
+                }
+                let bits = addr.to_bits();
+                let words = [
+                    (bits >> 96) as u32,
+                    (bits >> 64) as u32,
+                    (bits >> 32) as u32,
+                    bits as u32,
+                ];
+                Ok((IpVersion::V6, Prefix::new(words, len)))
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,5 +343,96 @@ mod tests {
             Address([0xFFFF_FFFF; 4]).masked(33),
             Address([0xFFFF_FFFF, 0x8000_0000, 0, 0])
         );
+    }
+}
+
+#[cfg(all(test, feature = "parse"))]
+mod parse_tests {
+    use super::{CidrParseError, IpVersion, Prefix};
+
+    fn parse(cidr: &str) -> (IpVersion, Prefix) {
+        Prefix::parse_cidr(cidr).expect("expected a parseable prefix")
+    }
+
+    #[test]
+    fn parses_ipv4() {
+        let (version, prefix) = parse("192.0.2.0/24");
+        assert!(matches!(version, IpVersion::V4));
+        assert_eq!(prefix, Prefix::new([0xC000_0200, 0, 0, 0], 24));
+    }
+
+    #[test]
+    fn parses_ipv6() {
+        let (version, prefix) = parse("2001:db8::/32");
+        assert!(matches!(version, IpVersion::V6));
+        assert_eq!(prefix, Prefix::new([0x2001_0db8, 0, 0, 0], 32));
+    }
+
+    #[test]
+    fn masks_host_bits() {
+        let (_, prefix) = parse("10.1.2.3/8");
+        assert_eq!(prefix, Prefix::new([0x0A00_0000, 0, 0, 0], 8));
+    }
+
+    #[test]
+    fn parses_full_length_prefixes() {
+        let (_, v4) = parse("192.0.2.1/32");
+        assert_eq!(v4, Prefix::new([0xC000_0201, 0, 0, 0], 32));
+        let (_, v6) = parse("2001:db8::1/128");
+        assert_eq!(v6, Prefix::new([0x2001_0db8, 0, 0, 1], 128));
+    }
+
+    #[test]
+    fn parses_default_routes() {
+        let (v4_version, v4) = parse("0.0.0.0/0");
+        assert!(matches!(v4_version, IpVersion::V4));
+        assert_eq!(v4, Prefix::new([0, 0, 0, 0], 0));
+        let (v6_version, v6) = parse("::/0");
+        assert!(matches!(v6_version, IpVersion::V6));
+        assert_eq!(v6, Prefix::new([0, 0, 0, 0], 0));
+    }
+
+    #[test]
+    fn rejects_over_length() {
+        assert!(matches!(
+            Prefix::parse_cidr("192.0.2.0/33"),
+            Err(CidrParseError::LengthTooLong { len: 33, max: 32 })
+        ));
+        assert!(matches!(
+            Prefix::parse_cidr("2001:db8::/129"),
+            Err(CidrParseError::LengthTooLong { len: 129, max: 128 })
+        ));
+    }
+
+    #[test]
+    fn rejects_missing_separator() {
+        assert!(matches!(
+            Prefix::parse_cidr("192.0.2.0"),
+            Err(CidrParseError::MissingSeparator)
+        ));
+        assert!(matches!(
+            Prefix::parse_cidr("::"),
+            Err(CidrParseError::MissingSeparator)
+        ));
+        assert!(matches!(
+            Prefix::parse_cidr(""),
+            Err(CidrParseError::MissingSeparator)
+        ));
+    }
+
+    #[test]
+    fn rejects_bad_address() {
+        assert!(matches!(
+            Prefix::parse_cidr("not-an-ip/24"),
+            Err(CidrParseError::Address(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_bad_length() {
+        assert!(matches!(
+            Prefix::parse_cidr("192.0.2.0/abc"),
+            Err(CidrParseError::Length(_))
+        ));
     }
 }
