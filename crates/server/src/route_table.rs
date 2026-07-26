@@ -7,7 +7,7 @@ use slash0_core::thick::ThickData;
 use slash0_core::timestamp::Timestamp;
 use slash0_core::tree::RadixTree;
 use tokio::sync::broadcast;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::ris_client::messages::{RisMessage, RisMessageBody};
 
@@ -47,6 +47,38 @@ impl RouteTable {
             v4: Mutex::new(RadixTree::new(VecSlab::new())),
             v6: Mutex::new(RadixTree::new(VecSlab::new())),
             updates: broadcast::channel(UPDATE_CHANNEL_CAPACITY).0,
+        }
+    }
+
+    /// Builds a route table and spawns a background task that ingests `receiver`
+    /// until the RIS stream closes. The returned handle can be cloned freely and
+    /// used to [`subscribe`](Self::subscribe); the ingest task holds its own
+    /// `Arc`, so ingest continues regardless of how many handles remain.
+    pub fn spawn(receiver: broadcast::Receiver<RisMessage>) -> Arc<Self> {
+        let table = Arc::new(Self::new());
+        let ingest = Arc::clone(&table);
+        tokio::spawn(async move { ingest.run(receiver).await });
+        table
+    }
+
+    /// Drains `receiver` into the tries until the stream closes. A `Lagged`
+    /// receiver logs how many updates it dropped and resumes at the oldest
+    /// retained message; the tries then simply carry the resulting gap until the
+    /// affected prefixes are next announced or withdrawn.
+    async fn run(&self, mut receiver: broadcast::Receiver<RisMessage>) {
+        loop {
+            match receiver.recv().await {
+                Ok(message) => self.ingest(message),
+                Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                    metrics::counter!("slash0_route_table_dropped_messages_total")
+                        .increment(dropped);
+                    warn!(dropped, "route table ingest lagged behind RIS Live");
+                }
+                Err(broadcast::error::RecvError::Closed) => {
+                    info!("RIS Live stream closed, route table ingest stopping");
+                    break;
+                }
+            }
         }
     }
 
@@ -310,5 +342,51 @@ mod tests {
         let streamed = updates.try_recv().expect("stream carries the later update");
         assert!(matches!(streamed.body, RisMessageBody::Update(_)));
         assert!(snapshot.lookup(network_address("10.0.0.0/8")).is_none());
+    }
+
+    #[tokio::test]
+    async fn run_drains_buffered_messages_then_stops_on_close() {
+        let (tx, rx) = broadcast::channel(16);
+        tx.send(message(1.0, update(&["192.0.2.0/24"], &[])))
+            .unwrap();
+        tx.send(message(2.0, update(&["2001:db8::/32"], &[])))
+            .unwrap();
+        drop(tx);
+
+        // With the sender dropped, recv() yields both buffered messages in order
+        // and then `Closed`, so run() drains everything and returns — no sleeps.
+        let table = RouteTable::new();
+        table.run(rx).await;
+
+        assert!(is_announced(
+            &snapshot(&table, IpVersion::V4),
+            "192.0.2.0/24"
+        ));
+        assert!(is_announced(
+            &snapshot(&table, IpVersion::V6),
+            "2001:db8::/32"
+        ));
+    }
+
+    #[tokio::test]
+    async fn run_survives_lag_and_keeps_applying() {
+        // Overflow a small ring before draining so the first recv() lags.
+        let (tx, rx) = broadcast::channel(2);
+        for i in 0..5 {
+            let prefix = format!("10.0.{i}.0/24");
+            tx.send(message(1.0, update(&[prefix.as_str()], &[])))
+                .unwrap();
+        }
+        drop(tx);
+
+        let table = RouteTable::new();
+        table.run(rx).await;
+
+        // The most recent message is always retained, so it must have been
+        // applied — proving run() continued past the Lagged error.
+        assert!(is_announced(
+            &snapshot(&table, IpVersion::V4),
+            "10.0.4.0/24"
+        ));
     }
 }
