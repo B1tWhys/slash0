@@ -15,3 +15,8 @@ server:
 logging:
   # tracing EnvFilter directive.
   filter: "info,slash0=debug,tower_http=debug"
+
+ris:
+  # RIS Live route collector (RRC) to consume from. Every peer that collector
+  # sees is ingested (announcements and withdrawals both).
+  host: rrc00.ripe.net

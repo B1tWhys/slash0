@@ -15,6 +15,7 @@ const DEFAULT_CONFIG_PATH: &str = "config/server.yaml";
 pub struct Config {
     pub server: ServerConfig,
     pub logging: LoggingConfig,
+    pub ris: RisConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +35,14 @@ pub struct LoggingConfig {
     pub filter: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RisConfig {
+    /// RIS Live route collector (RRC) hostname to consume from. Every peer that
+    /// collector sees is ingested (announcements and withdrawals both).
+    pub host: String,
+}
+
 impl Default for ServerConfig {
     fn default() -> Self {
         Self {
@@ -48,6 +57,14 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             filter: "info,slash0=debug,tower_http=debug".to_owned(),
+        }
+    }
+}
+
+impl Default for RisConfig {
+    fn default() -> Self {
+        Self {
+            host: "rrc00.ripe.net".to_owned(),
         }
     }
 }

@@ -1,9 +1,11 @@
 mod config;
 mod http;
-// RIS Live client is built but not yet wired into ingest.
+// Consumed by the route table below; also carries protocol types (e.g.
+// client-to-server messages) that aren't exercised yet.
 #[allow(dead_code)]
 mod ris_client;
-// Route table is built up incrementally and not yet wired into ingest.
+// Ingest is wired up in main(); subscribe() stays unused until the websocket
+// layer serves snapshots.
 #[allow(dead_code)]
 mod route_table;
 
@@ -16,6 +18,8 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::LoggingConfig;
+use crate::ris_client::messages::{BgpMessageType, SubscriptionFilters};
+use crate::route_table::RouteTable;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "slash0 BGP visualization server")]
@@ -30,6 +34,18 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = config::load(cli.config)?;
     init_tracing(&config.logging)?;
+
+    let ris = ris_client::stream::subscribe(SubscriptionFilters {
+        host: Some(config.ris.host.clone()),
+        message_type: Some(BgpMessageType::Update),
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("failed to subscribe to RIS Live host {}", config.ris.host))?;
+    // Ingest runs in the background regardless of this handle; hold it for the
+    // websocket layer to subscribe to once the wire protocol is settled.
+    let _route_table = RouteTable::spawn(ris.subscribe());
+    info!(host = %config.ris.host, "ingesting RIS Live updates");
 
     let addr = config.server.socket_addr();
     let app = http::router(&config);
