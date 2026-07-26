@@ -10,6 +10,7 @@ mod ris_client;
 mod route_table;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -60,10 +61,22 @@ async fn main() -> anyhow::Result<()> {
     })
     .await
     .with_context(|| format!("failed to subscribe to RIS Live host {}", config.ris.host))?;
-    // Ingest runs in the background regardless of this handle; hold it for the
-    // websocket layer to subscribe to once the wire protocol is settled.
-    let _route_table = RouteTable::spawn(ris.subscribe());
+    // Ingest runs in the background regardless of this handle; it also feeds the
+    // trie-size metrics below and the websocket layer once the wire protocol is
+    // settled.
+    let route_table = RouteTable::spawn(ris.subscribe());
     info!(host = %config.ris.host, "ingesting RIS Live updates");
+
+    tokio::spawn({
+        let route_table = Arc::clone(&route_table);
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                route_table.record_metrics();
+            }
+        }
+    });
 
     let addr = config.server.socket_addr();
     let app = http::router(&config, metrics_handle);

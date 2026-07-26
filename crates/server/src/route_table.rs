@@ -89,6 +89,24 @@ impl RouteTable {
         }
     }
 
+    /// Publishes the per-family trie tallies to the metrics recorder. Each trie
+    /// maintains its own counts, so this is a lock plus a few field reads per
+    /// family; call it on a periodic cadence rather than per update.
+    pub fn record_metrics(&self) {
+        for (version, ip_version) in [(IpVersion::V4, "v4"), (IpVersion::V6, "v6")] {
+            let tree = self
+                .tree_for(version)
+                .lock()
+                .expect("route table mutex poisoned");
+            metrics::gauge!("slash0_route_table_total_nodes", "ipVersion" => ip_version)
+                .set(tree.node_count() as f64);
+            metrics::gauge!("slash0_route_table_announced_nodes", "ipVersion" => ip_version)
+                .set(tree.announced_count() as f64);
+            metrics::counter!("slash0_route_table_sweeps_total", "ipVersion" => ip_version)
+                .absolute(tree.sweep_count() as u64);
+        }
+    }
+
     /// Applies one message to the tries, then re-broadcasts it to subscribers.
     ///
     /// The re-broadcast happens *after* the trie mutation so a receiver handed

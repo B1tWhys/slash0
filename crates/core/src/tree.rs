@@ -25,6 +25,14 @@ use core::marker::PhantomData;
 pub struct RadixTree<D: NodeData, S: SlabRead<Node<D>>> {
     pub slab: S,
     root: Option<NodeIdx>,
+    /// Count of currently-announced nodes, maintained incrementally by the
+    /// mutation API so the server can read it in O(1) rather than walking the
+    /// trie. The total node count comes straight from the slab; only this
+    /// announced subset needs its own tally. `u32` (not `usize`/`u64`) so the
+    /// field stays shader-representable under `rust-gpu`.
+    announced_count: u32,
+    /// Number of [`sweep_tombstones`](Self::sweep_tombstones) passes run so far.
+    sweep_count: u32,
     _phantom: PhantomData<D>,
 }
 
@@ -71,6 +79,8 @@ impl<D: NodeData, S: SlabRead<Node<D>>> RadixTree<D, S> {
         Self {
             slab,
             root,
+            announced_count: 0,
+            sweep_count: 0,
             _phantom: PhantomData,
         }
     }
@@ -80,6 +90,30 @@ impl<D: NodeData, S: SlabRead<Node<D>>> RadixTree<D, S> {
     /// shader where to start walking.
     pub fn root(&self) -> Option<NodeIdx> {
         self.root
+    }
+
+    /// Number of live nodes in the tree: announced prefixes plus the structural
+    /// split nodes and not-yet-swept withdrawn nodes that hold the topology
+    /// together. Read straight from the slab's live-allocation count, so it is
+    /// accurate for any tree, including a [`with_root`](Self::with_root) view
+    /// over an uploaded slab.
+    pub fn node_count(&self) -> u32 {
+        self.slab.len()
+    }
+
+    /// Number of currently-announced nodes, i.e. live BGP prefixes. Maintained
+    /// incrementally by the mutation API, so it is only meaningful on a tree
+    /// grown through [`insert`](Self::insert) / [`withdraw`](Self::withdraw),
+    /// not on a [`with_root`](Self::with_root) view over an uploaded slab.
+    pub fn announced_count(&self) -> u32 {
+        self.announced_count
+    }
+
+    /// Number of [`sweep_tombstones`](Self::sweep_tombstones) passes performed
+    /// on this tree, counting no-op passes. Carries the same maintenance caveat
+    /// as [`announced_count`](Self::announced_count).
+    pub fn sweep_count(&self) -> u32 {
+        self.sweep_count
     }
 
     /// Longest-prefix-match lookup: returns the slab index of the deepest
@@ -166,10 +200,16 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
         // Exact match: re-announce at subroot.
         if node_prefix == prefix {
             let before = self.slab.get(subroot).data.timestamp();
+            let was_announced = self.slab.get(subroot).is_announced();
             {
                 let node = self.slab.get_mut(subroot);
                 node.set_announced(true);
                 node.data.apply_announce(incoming, ts);
+            }
+            // Re-announcing a tombstoned slot brings a node back to announced;
+            // re-announcing a still-live prefix leaves the tally unchanged.
+            if !was_announced {
+                self.announced_count += 1;
             }
             dirty(subroot);
             return InsertOutcome {
@@ -314,6 +354,7 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                 node.set_announced(false);
                 node.data.apply_withdraw(ts);
             }
+            self.announced_count -= 1;
             dirty(subroot);
             return WithdrawOutcome::Withdrew {
                 ts_advanced: ts > before,
@@ -357,6 +398,7 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
             flags: NodeFlags::ANNOUNCED,
             data,
         };
+        self.announced_count += 1;
         idx
     }
 
@@ -388,6 +430,7 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
     /// `dirty` fires for each parent whose child pointer changed; the freed
     /// slot itself is not emitted (nothing in the live tree references it).
     pub fn sweep_tombstones(&mut self, dirty: &mut impl FnMut(NodeIdx)) {
+        self.sweep_count += 1;
         let Some(root) = self.root else { return };
         self.sweep_recursive(root, None, dirty);
     }
@@ -777,6 +820,110 @@ mod tests {
         swp(&mut tree);
         assert_eq!(tree.root(), root_after_first);
         assert_eq!(tree.slab.len(), len_after_first);
+    }
+
+    #[test]
+    fn counts_start_at_zero() {
+        let tree = new_tree();
+        assert_eq!(tree.node_count(), 0);
+        assert_eq!(tree.announced_count(), 0);
+        assert_eq!(tree.sweep_count(), 0);
+    }
+
+    #[test]
+    fn insert_tracks_node_and_announced_counts() {
+        let mut tree = new_tree();
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        assert_eq!(tree.node_count(), 1);
+        assert_eq!(tree.announced_count(), 1);
+
+        // A disjoint prefix forces a structural split: one announced leaf plus
+        // one non-announced split node.
+        ins(&mut tree, v4("128.0.0.0/8"), 100);
+        assert_eq!(tree.node_count(), 3);
+        assert_eq!(tree.announced_count(), 2);
+    }
+
+    #[test]
+    fn reannounce_of_live_prefix_does_not_double_count() {
+        let mut tree = new_tree();
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        ins(&mut tree, v4("10.0.0.0/8"), 200);
+        assert_eq!(tree.node_count(), 1);
+        assert_eq!(tree.announced_count(), 1);
+    }
+
+    #[test]
+    fn withdraw_drops_announced_but_keeps_node_until_sweep() {
+        let mut tree = new_tree();
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        assert_eq!(tree.announced_count(), 0);
+        assert_eq!(tree.node_count(), 1, "tombstone remains until swept");
+    }
+
+    #[test]
+    fn double_withdraw_decrements_announced_once() {
+        let mut tree = new_tree();
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        assert!(!wdw(&mut tree, v4("10.0.0.0/8"), 300));
+        assert_eq!(tree.announced_count(), 0);
+    }
+
+    #[test]
+    fn reannounce_after_withdraw_recounts_announced() {
+        let mut tree = new_tree();
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        ins(&mut tree, v4("10.0.0.0/8"), 300);
+        assert_eq!(tree.announced_count(), 1);
+        assert_eq!(tree.node_count(), 1, "the tombstoned slot is reused");
+    }
+
+    #[test]
+    fn announcing_an_existing_structural_node_counts_announced_only() {
+        let mut tree = new_tree();
+        // Two /9s under a common /8 leave a structural, never-announced split
+        // node sitting at 10.0.0.0/8.
+        ins(&mut tree, v4("10.0.0.0/9"), 100);
+        ins(&mut tree, v4("10.128.0.0/9"), 100);
+        assert_eq!(tree.announced_count(), 2);
+        assert_eq!(tree.node_count(), 3);
+
+        // Announcing that exact /8 lights up the existing split node: no new
+        // slot is allocated, but the announced tally rises.
+        ins(&mut tree, v4("10.0.0.0/8"), 200);
+        assert_eq!(
+            tree.node_count(),
+            3,
+            "no new node should have been allocated"
+        );
+        assert_eq!(tree.announced_count(), 3);
+    }
+
+    #[test]
+    fn sweep_reclaims_tombstoned_nodes_from_node_count() {
+        let mut tree = new_tree();
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        ins(&mut tree, v4("128.0.0.0/8"), 100);
+        assert_eq!(tree.node_count(), 3);
+        assert!(wdw(&mut tree, v4("10.0.0.0/8"), 200));
+        swp(&mut tree);
+        // The withdrawn leaf is freed and the now-degenerate split collapses,
+        // leaving only the surviving announced /8.
+        assert_eq!(tree.node_count(), 1);
+        assert_eq!(tree.announced_count(), 1);
+    }
+
+    #[test]
+    fn sweep_count_increments_every_call_including_noops() {
+        let mut tree = new_tree();
+        swp(&mut tree);
+        assert_eq!(tree.sweep_count(), 1, "an empty-tree sweep still counts");
+        ins(&mut tree, v4("10.0.0.0/8"), 100);
+        swp(&mut tree);
+        assert_eq!(tree.sweep_count(), 2);
     }
 
     #[test]
