@@ -3,6 +3,9 @@ mod http;
 // RIS Live client is built but not yet wired into ingest.
 #[allow(dead_code)]
 mod ris_client;
+// Route table is built up incrementally and not yet wired into ingest.
+#[allow(dead_code)]
+mod route_table;
 
 use std::path::PathBuf;
 

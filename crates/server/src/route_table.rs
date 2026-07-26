@@ -1,0 +1,314 @@
+use std::sync::{Arc, Mutex};
+
+use slash0_core::node::Node;
+use slash0_core::prefix::{IpVersion, Prefix};
+use slash0_core::slab::VecSlab;
+use slash0_core::thick::ThickData;
+use slash0_core::timestamp::Timestamp;
+use slash0_core::tree::RadixTree;
+use tokio::sync::broadcast;
+use tracing::warn;
+
+use crate::ris_client::messages::{RisMessage, RisMessageBody};
+
+/// Server-side radix trie carrying full BGP metadata per node.
+type ThickTree = RadixTree<ThickData, VecSlab<Node<ThickData>>>;
+
+/// Capacity of the re-broadcast channel a subscriber falls back on. A consumer
+/// that lags this far behind sees `RecvError::Lagged` and needs a fresh
+/// subscription; sized to absorb the per-update RIS Live bursts.
+const UPDATE_CHANNEL_CAPACITY: usize = 10_000;
+
+/// Owns the IPv4 and IPv6 route tries and applies RIS Live BGP updates to them.
+///
+/// The tries are private and never handed out directly. [`subscribe`] is the
+/// only way to read state out: it returns an owned snapshot of a trie plus a
+/// receiver for the updates applied after that snapshot, aligned so the stream
+/// resumes exactly where the snapshot ends. Each family has its own lock so
+/// reading one doesn't block ingest of the other.
+///
+/// The snapshot is returned as an `Arc` rather than by value so this signature
+/// survives the eventual move to non-blocking (arc-swap) snapshotting, where the
+/// snapshot is an atomically-loaded `Arc` instead of a lock-and-clone.
+///
+/// [`subscribe`]: RouteTable::subscribe
+pub struct RouteTable {
+    v4: Mutex<ThickTree>,
+    v6: Mutex<ThickTree>,
+    /// Every ingested message is re-broadcast here after it has been applied, so
+    /// a subscriber's stream begins right after its snapshot. Re-emitting after
+    /// applying is what keeps a new receiver from starting ahead of the snapshot.
+    updates: broadcast::Sender<RisMessage>,
+}
+
+impl RouteTable {
+    fn new() -> Self {
+        Self {
+            v4: Mutex::new(RadixTree::new(VecSlab::new())),
+            v6: Mutex::new(RadixTree::new(VecSlab::new())),
+            updates: broadcast::channel(UPDATE_CHANNEL_CAPACITY).0,
+        }
+    }
+
+    fn tree_for(&self, version: IpVersion) -> &Mutex<ThickTree> {
+        match version {
+            IpVersion::V4 => &self.v4,
+            IpVersion::V6 => &self.v6,
+        }
+    }
+
+    /// Applies one message to the tries, then re-broadcasts it to subscribers.
+    ///
+    /// The re-broadcast happens *after* the trie mutation so a receiver handed
+    /// out by [`subscribe`](Self::subscribe) can never start ahead of the
+    /// snapshot it was paired with — at worst it repeats the boundary message,
+    /// which is harmless since applying an update is idempotent.
+    fn ingest(&self, message: RisMessage) {
+        self.apply_message(&message);
+        // A send error only means no subscribers are attached right now.
+        let _ = self.updates.send(message);
+    }
+
+    /// Applies one RIS Live message: every announced prefix is inserted and every
+    /// withdrawn prefix is withdrawn, each routed to the trie for its family.
+    /// Non-`UPDATE` messages and unparseable prefixes are skipped.
+    fn apply_message(&self, message: &RisMessage) {
+        let RisMessageBody::Update(update) = &message.body else {
+            return;
+        };
+        let ts = Timestamp::from_millis((message.timestamp * 1000.0) as u64);
+
+        let announced = update
+            .announcements
+            .iter()
+            .flatten()
+            .flat_map(|announcement| &announcement.prefixes);
+        for cidr in announced {
+            self.apply_prefix(cidr, "announced", |tree, prefix| {
+                tree.insert(prefix, ts, ThickData::default(), &mut |_| {});
+            });
+        }
+
+        for cidr in update.withdrawals.iter().flatten() {
+            self.apply_prefix(cidr, "withdrawn", |tree, prefix| {
+                tree.withdraw(prefix, ts, &mut |_| {});
+            });
+        }
+    }
+
+    /// Parses `cidr`, locks the trie for its family, and hands both to `apply`.
+    /// Unparseable prefixes are logged and skipped rather than aborting the batch.
+    fn apply_prefix(
+        &self,
+        cidr: &str,
+        kind: &'static str,
+        apply: impl FnOnce(&mut ThickTree, Prefix),
+    ) {
+        match Prefix::parse_cidr(cidr) {
+            Ok((version, prefix)) => {
+                let mut tree = self
+                    .tree_for(version)
+                    .lock()
+                    .expect("route table mutex poisoned");
+                apply(&mut tree, prefix);
+            }
+            Err(error) => warn!(%cidr, %error, "skipping unparseable {kind} prefix"),
+        }
+    }
+
+    /// Returns an owned snapshot of the trie for `version` plus a receiver for the
+    /// updates applied after it. The snapshot is decoupled from further ingest,
+    /// and the receiver's stream resumes exactly where the snapshot ends.
+    ///
+    /// Blocks that family's ingest for the duration of the (cheap) slab clone.
+    pub fn subscribe(
+        &self,
+        version: IpVersion,
+    ) -> (Arc<ThickTree>, broadcast::Receiver<RisMessage>) {
+        let tree = self
+            .tree_for(version)
+            .lock()
+            .expect("route table mutex poisoned");
+        let snapshot = Arc::new((*tree).clone());
+        // Subscribe while still holding the lock: ingest re-broadcasts only after
+        // applying, so nothing this family will stream can slip in before now.
+        let updates = self.updates.subscribe();
+        (snapshot, updates)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use slash0_core::prefix::Address;
+    use slash0_core::slab::SlabRead;
+
+    use crate::ris_client::messages::{Announcement, BgpUpdate};
+
+    fn message(timestamp: f64, body: RisMessageBody) -> RisMessage {
+        RisMessage {
+            timestamp,
+            peer: "192.0.2.1".to_owned(),
+            peer_asn: "64500".to_owned(),
+            id: "test".to_owned(),
+            host: "rrc00".to_owned(),
+            raw: None,
+            body,
+        }
+    }
+
+    /// An `UPDATE` announcing every prefix in `announcements` (under one next
+    /// hop) and withdrawing every prefix in `withdrawals`.
+    fn update(announcements: &[&str], withdrawals: &[&str]) -> RisMessageBody {
+        RisMessageBody::Update(BgpUpdate {
+            announcements: (!announcements.is_empty()).then(|| {
+                vec![Announcement {
+                    next_hop: "192.0.2.1".to_owned(),
+                    prefixes: announcements.iter().map(|s| s.to_string()).collect(),
+                }]
+            }),
+            withdrawals: (!withdrawals.is_empty())
+                .then(|| withdrawals.iter().map(|s| s.to_string()).collect()),
+            ..Default::default()
+        })
+    }
+
+    fn network_address(cidr: &str) -> Address {
+        Prefix::parse_cidr(cidr).expect("valid CIDR").1.address()
+    }
+
+    /// Whether `tree` has `cidr` as a currently-announced exact-match prefix.
+    fn is_announced(tree: &ThickTree, cidr: &str) -> bool {
+        let (_, prefix) = Prefix::parse_cidr(cidr).expect("valid CIDR");
+        match tree.lookup(prefix.address()) {
+            Some(idx) => tree.slab.get(idx).prefix == prefix,
+            None => false,
+        }
+    }
+
+    fn snapshot(table: &RouteTable, version: IpVersion) -> Arc<ThickTree> {
+        table.subscribe(version).0
+    }
+
+    #[test]
+    fn routes_each_family_to_its_own_tree() {
+        let table = RouteTable::new();
+        table.ingest(message(1.0, update(&["192.0.2.0/24"], &[])));
+
+        assert!(is_announced(
+            &snapshot(&table, IpVersion::V4),
+            "192.0.2.0/24"
+        ));
+        assert!(snapshot(&table, IpVersion::V6).root().is_none());
+
+        table.ingest(message(1.0, update(&["2001:db8::/32"], &[])));
+        assert!(is_announced(
+            &snapshot(&table, IpVersion::V6),
+            "2001:db8::/32"
+        ));
+    }
+
+    #[test]
+    fn withdraw_removes_the_prefix() {
+        let table = RouteTable::new();
+        table.ingest(message(1.0, update(&["192.0.2.0/24"], &[])));
+        table.ingest(message(2.0, update(&[], &["192.0.2.0/24"])));
+
+        assert!(
+            snapshot(&table, IpVersion::V4)
+                .lookup(network_address("192.0.2.0/24"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn non_update_messages_are_ignored() {
+        let table = RouteTable::new();
+        table.ingest(message(1.0, RisMessageBody::Keepalive));
+
+        assert!(snapshot(&table, IpVersion::V4).root().is_none());
+        assert!(snapshot(&table, IpVersion::V6).root().is_none());
+    }
+
+    #[test]
+    fn one_message_routes_valid_prefixes_and_drops_malformed() {
+        let table = RouteTable::new();
+        table.ingest(message(
+            1.0,
+            update(&["192.0.2.0/24", "2001:db8::/32", "garbage/24"], &[]),
+        ));
+
+        assert!(is_announced(
+            &snapshot(&table, IpVersion::V4),
+            "192.0.2.0/24"
+        ));
+        assert!(is_announced(
+            &snapshot(&table, IpVersion::V6),
+            "2001:db8::/32"
+        ));
+    }
+
+    #[test]
+    fn derives_timestamp_from_message() {
+        let table = RouteTable::new();
+        table.ingest(message(1.5, update(&["192.0.2.0/24"], &[])));
+
+        let tree = snapshot(&table, IpVersion::V4);
+        let idx = tree.lookup(network_address("192.0.2.0/24")).unwrap();
+        assert_eq!(
+            tree.slab.get(idx).data.timestamp,
+            Timestamp::from_millis(1500)
+        );
+    }
+
+    #[test]
+    fn empty_update_is_a_noop() {
+        let table = RouteTable::new();
+        table.ingest(message(1.0, update(&[], &[])));
+
+        assert!(snapshot(&table, IpVersion::V4).root().is_none());
+        assert!(snapshot(&table, IpVersion::V6).root().is_none());
+    }
+
+    #[test]
+    fn reannounce_updates_timestamp() {
+        let table = RouteTable::new();
+        table.ingest(message(1.0, update(&["192.0.2.0/24"], &[])));
+        table.ingest(message(2.0, update(&["192.0.2.0/24"], &[])));
+
+        let tree = snapshot(&table, IpVersion::V4);
+        let idx = tree.lookup(network_address("192.0.2.0/24")).unwrap();
+        assert_eq!(
+            tree.slab.get(idx).data.timestamp,
+            Timestamp::from_millis(2000)
+        );
+    }
+
+    #[test]
+    fn withdraw_of_unannounced_prefix_leaves_tree_empty() {
+        let table = RouteTable::new();
+        table.ingest(message(1.0, update(&[], &["10.0.0.0/8"])));
+
+        assert!(snapshot(&table, IpVersion::V4).root().is_none());
+    }
+
+    #[test]
+    fn subscriber_stream_resumes_after_snapshot() {
+        let table = RouteTable::new();
+        table.ingest(message(1.0, update(&["192.0.2.0/24"], &[])));
+
+        let (snapshot, mut updates) = table.subscribe(IpVersion::V4);
+
+        // The snapshot reflects everything applied before the subscribe.
+        assert!(is_announced(&snapshot, "192.0.2.0/24"));
+        // The stream has nothing yet — it begins where the snapshot ends.
+        assert!(updates.try_recv().is_err());
+
+        // A later update lands on the stream, but not in the already-taken snapshot.
+        table.ingest(message(2.0, update(&["10.0.0.0/8"], &[])));
+
+        let streamed = updates.try_recv().expect("stream carries the later update");
+        assert!(matches!(streamed.body, RisMessageBody::Update(_)));
+        assert!(snapshot.lookup(network_address("10.0.0.0/8")).is_none());
+    }
+}

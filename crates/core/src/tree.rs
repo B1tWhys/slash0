@@ -17,6 +17,11 @@ use core::marker::PhantomData;
 /// Timestamps propagate max-to-root on every announce and withdraw, so
 /// `lookup` and downstream renderers can read "time since any descendant was
 /// touched" from any interior node.
+///
+/// Cloning deep-copies the backing slab (requires `S: Clone`), yielding a tree
+/// fully decoupled from the original — the basis for handing out owned
+/// snapshots.
+#[derive(Clone)]
 pub struct RadixTree<D: NodeData, S: SlabRead<Node<D>>> {
     pub slab: S,
     root: Option<NodeIdx>,
