@@ -19,6 +19,7 @@ use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::config::LoggingConfig;
 use crate::ris_client::messages::{BgpMessageType, SubscriptionFilters};
@@ -74,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 interval.tick().await;
                 route_table.record_metrics();
+                route_table.sweep();
             }
         }
     });
@@ -99,6 +101,7 @@ fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {
         .with_context(|| format!("invalid log filter directive: {}", config.filter))?;
     tracing_subscriber::fmt()
         .pretty()
+        .with_span_events(FmtSpan::CLOSE)
         .with_env_filter(filter)
         .try_init()
         .map_err(|err| anyhow::anyhow!("failed to initialize tracing: {err}"))?;

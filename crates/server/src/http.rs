@@ -7,8 +7,8 @@ use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Serialize;
 use tower::ServiceBuilder;
 use tower_http::services::ServeDir;
-use tower_http::trace::TraceLayer;
-use tracing::info;
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
+use tracing::{Level, info};
 
 use crate::config::Config;
 
@@ -26,7 +26,9 @@ pub fn router(config: &Config, metrics_handle: PrometheusHandle) -> Router {
         )
         .nest("/api", api_router())
         .fallback_service(ServeDir::new(&config.server.assets_dir))
-        .layer(ServiceBuilder::new().layer(TraceLayer::new_for_http()))
+        .layer(ServiceBuilder::new().layer(
+            TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(Level::TRACE)),
+        ))
 }
 
 /// API responses are JSON-only. Returning `Json` sets `application/json`;

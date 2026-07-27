@@ -7,7 +7,7 @@ use slash0_core::thick::ThickData;
 use slash0_core::timestamp::Timestamp;
 use slash0_core::tree::RadixTree;
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{Level, field, info, span, warn};
 
 use crate::ris_client::messages::{RisMessage, RisMessageBody};
 
@@ -104,6 +104,36 @@ impl RouteTable {
                 .set(tree.announced_count() as f64);
             metrics::counter!("slash0_route_table_sweeps_total", "ipVersion" => ip_version)
                 .absolute(tree.sweep_count() as u64);
+        }
+    }
+
+    /// Reclaims tombstoned slots in both families, one family at a time so a
+    /// sweep of one never blocks ingest of the other. Each walk runs in a span
+    /// whose close event reports its duration and how many slots it reclaimed,
+    /// so the sweep cadence can be evaluated against tree churn.
+    ///
+    /// Safe to run on any cadence server-side: the wire snapshot is a flat
+    /// prefix list that never exposes slab indices, and [`subscribe`] clones
+    /// under the same lock, so reclaimed slots can never be followed into an
+    /// unrelated subtree the way the GPU's in-flight slab could.
+    ///
+    /// [`subscribe`]: RouteTable::subscribe
+    pub fn sweep(&self) {
+        for (version, ip_version) in [(IpVersion::V4, "v4"), (IpVersion::V6, "v6")] {
+            let span = span!(
+                Level::DEBUG,
+                "sweep_tombstones",
+                ip_version,
+                reclaimed = field::Empty
+            );
+            let _guard = span.enter();
+            let mut tree = self
+                .tree_for(version)
+                .lock()
+                .expect("route table mutex poisoned");
+            let before = tree.node_count();
+            tree.sweep_tombstones(&mut |_| {});
+            span.record("reclaimed", before - tree.node_count());
         }
     }
 
