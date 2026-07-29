@@ -98,10 +98,10 @@ impl RouteTable {
             v6_route_count,
             total_mrt_route_count,
         )
-            .in_scope(|| {
-                self.bulk_insert_routes(IpVersion::V4, v4_routes);
-                self.bulk_insert_routes(IpVersion::V6, v6_routes);
-            });
+        .in_scope(|| {
+            self.bulk_insert_routes(IpVersion::V4, v4_routes);
+            self.bulk_insert_routes(IpVersion::V6, v6_routes);
+        });
     }
 
     fn bulk_insert_routes(&self, ip_version: IpVersion, routes: HashMap<Prefix, Timestamp>) {
@@ -196,7 +196,7 @@ impl RouteTable {
     ///
     /// The re-broadcast happens *after* the trie mutation so a receiver handed
     /// out by [`subscribe`](Self::subscribe) can never start ahead of the
-    /// snapshot it was paired with — at worst it repeats the boundary message,
+    /// snapshot it was paired with -- at worst it repeats the boundary message,
     /// which is harmless since applying an update is idempotent.
     fn ingest(&self, message: RisMessage) {
         self.apply_message(&message);
@@ -436,7 +436,7 @@ mod tests {
 
         // The snapshot reflects everything applied before the subscribe.
         assert!(is_announced(&snapshot, "192.0.2.0/24"));
-        // The stream has nothing yet — it begins where the snapshot ends.
+        // The stream has nothing yet -- it begins where the snapshot ends.
         assert!(updates.try_recv().is_err());
 
         // A later update lands on the stream, but not in the already-taken snapshot.
@@ -457,7 +457,7 @@ mod tests {
         drop(tx);
 
         // With the sender dropped, recv() yields both buffered messages in order
-        // and then `Closed`, so run() drains everything and returns — no sleeps.
+        // and then `Closed`, so run() drains everything and returns -- no sleeps.
         let table = RouteTable::new();
         table.run(rx).await;
 
@@ -486,7 +486,7 @@ mod tests {
         table.run(rx).await;
 
         // The most recent message is always retained, so it must have been
-        // applied — proving run() continued past the Lagged error.
+        // applied -- proving run() continued past the Lagged error.
         assert!(is_announced(
             &snapshot(&table, IpVersion::V4),
             "10.0.4.0/24"

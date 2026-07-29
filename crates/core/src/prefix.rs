@@ -20,7 +20,7 @@ pub const MAX_PREFIX_LEN: u32 = 128;
 
 /// Which IP address family a [`Prefix`] belongs to.
 ///
-/// Kept out of the trie node payload — the trie is family-agnostic — but needed
+/// Kept out of the trie node payload -- the trie is family-agnostic -- but needed
 /// by consumers that maintain separate v4/v6 tries and by any wire encoding. The
 /// discriminants match the IP version numbers so the tag can serialize directly.
 #[derive(Copy, Clone, Debug)]

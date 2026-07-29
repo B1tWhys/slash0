@@ -19,7 +19,7 @@ use core::marker::PhantomData;
 /// touched" from any interior node.
 ///
 /// Cloning deep-copies the backing slab (requires `S: Clone`), yielding a tree
-/// fully decoupled from the original — the basis for handing out owned
+/// fully decoupled from the original -- the basis for handing out owned
 /// snapshots.
 #[derive(Clone)]
 pub struct RadixTree<D: NodeData, S: SlabRead<Node<D>>> {
@@ -43,7 +43,7 @@ struct InsertOutcome {
     /// Node index the parent should now reference at this slot. Equals the
     /// input `subroot` unless the frame restructured (split / promotion).
     new_subroot: NodeIdx,
-    /// The announced target node index — returned all the way up unchanged.
+    /// The announced target node index -- returned all the way up unchanged.
     target: NodeIdx,
     /// Whether `ts` advanced this level's timestamp. Once this is false, the
     /// max-to-root invariant guarantees no ancestor above will advance either.
@@ -245,7 +245,7 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                     ts_advanced,
                 };
             }
-            // No child in that slot — subroot gains a new leaf.
+            // No child in that slot -- subroot gains a new leaf.
             let leaf_idx = self.alloc_announced_node(prefix, incoming, ts);
             self.slab.get_mut(subroot).children[bit] = Some(leaf_idx);
             dirty(leaf_idx);
@@ -308,7 +308,7 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
     /// Clears the target's `ANNOUNCED` flag and invokes
     /// `data.apply_withdraw(ts)` on it. `ts` is then propagated max-to-root
     /// through the target's ancestors. The target node's slab slot is *not*
-    /// freed here — reclamation is deferred to
+    /// freed here -- reclamation is deferred to
     /// [`sweep_tombstones`](Self::sweep_tombstones) so the GPU's in-flight
     /// snapshot can't follow a recycled index into an unrelated subtree.
     ///
@@ -416,7 +416,7 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
     }
 
     /// Reclaims slab slots that are no longer contributing to the tree.
-    /// Meant to run at a frame boundary — never during a frame — so the GPU's
+    /// Meant to run at a frame boundary -- never during a frame -- so the GPU's
     /// current-frame slab snapshot cannot follow a recycled index into an
     /// unrelated subtree.
     ///
@@ -583,7 +583,7 @@ mod tests {
         // regression that costs a GPU upload of unchanged bytes.
         for &idx in &dirty_set {
             // (Some, None) freed, (None, Some) newly allocated, (None, None)
-            // allocated-and-freed in one mutation — all legitimate. Only
+            // allocated-and-freed in one mutation -- all legitimate. Only
             // (Some, Some) with identical bytes is wasteful.
             if let (Some(b), Some(a)) = (before.get(&idx), after.get(&idx)) {
                 assert!(

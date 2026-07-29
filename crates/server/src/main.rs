@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use bgpkit_parser::BgpkitParser;
 use clap::Parser;
 use metrics_exporter_prometheus::PrometheusBuilder;
