@@ -14,6 +14,9 @@ pub trait Slab<T>: SlabRead<T> {
     fn get_mut(&mut self, idx: NodeIdx) -> &mut T;
     fn alloc(&mut self) -> Option<NodeIdx>;
     fn free(&mut self, idx: NodeIdx);
+    /// Allocated capacity for the slab in bytes ([size] is the size of the objects in the vec)
+    fn size_capacity(&self) -> usize;
+    fn size(&self) -> usize;
 }
 
 #[cfg(feature = "alloc")]
@@ -88,6 +91,12 @@ mod vec_backed {
                 idx.get()
             );
             self.free_list.push(idx);
+        }
+        fn size_capacity(&self) -> usize {
+            size_of::<T>() * self.entries.capacity()
+        }
+        fn size(&self) -> usize {
+            size_of::<T>() * self.entries.len()
         }
     }
 }

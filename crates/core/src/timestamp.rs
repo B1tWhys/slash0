@@ -5,6 +5,10 @@ pub struct Timestamp(pub [u32; 2]);
 impl Timestamp {
     pub const ZERO: Self = Self([0, 0]);
 
+    pub const fn from_sec(s: f64) -> Self {
+        Self::from_millis((s * 1000.0) as u64)
+    }
+
     pub const fn from_millis(ms: u64) -> Self {
         Self([(ms >> 32) as u32, ms as u32])
     }

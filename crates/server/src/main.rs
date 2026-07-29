@@ -13,7 +13,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
+use bgpkit_parser::BgpkitParser;
 use clap::Parser;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio::signal;
@@ -65,8 +66,17 @@ async fn main() -> anyhow::Result<()> {
     // Ingest runs in the background regardless of this handle; it also feeds the
     // trie-size metrics below and the websocket layer once the wire protocol is
     // settled.
+    info!(host = %config.ris.host, "Subscribed to RIS Live updates");
+
     let route_table = RouteTable::spawn(ris.subscribe());
-    info!(host = %config.ris.host, "ingesting RIS Live updates");
+
+    if let Some(seed_file_path) = &config.ris.seed_file {
+        info!(seed_file_path, "Seeding from file");
+        let parser = BgpkitParser::from_reader(oneio::get_reader(seed_file_path)?);
+        route_table.add_routes_from(parser);
+    } else {
+        info!("No seed file configured, skipping seeding");
+    }
 
     tokio::spawn({
         let route_table = Arc::clone(&route_table);

@@ -20,3 +20,10 @@ ris:
   # RIS Live route collector (RRC) to consume from. Every peer that collector
   # sees is ingested (announcements and withdrawals both).
   host: rrc00.ripe.net
+  # Seed the trie with data from an RIS data dump file. Can be a URL, but server
+  # startup will be way faster with a file. File can be gzip'd. Optional,
+  # if omitted the server isn't seeded and accumulates routes slooowly
+  # from RIS live alone.
+  #
+  # Download files from: https://ris.ripe.net/docs/mrt/
+  # seed_file: ./bview.20260725.0000.gz

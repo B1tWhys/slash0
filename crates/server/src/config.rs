@@ -41,6 +41,13 @@ pub struct RisConfig {
     /// RIS Live route collector (RRC) hostname to consume from. Every peer that
     /// collector sees is ingested (announcements and withdrawals both).
     pub host: String,
+    /// Seed the trie with data from an RIS data dump file. Can be a URL, but server
+    /// startup will be way faster with a file. File can be gzip'd. Optional,
+    /// if omitted the server isn't seeded and accumulates routes slooowly
+    /// from RIS live alone.
+    ///
+    /// Download files from: https://ris.ripe.net/docs/mrt/
+    pub seed_file: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -65,6 +72,7 @@ impl Default for RisConfig {
     fn default() -> Self {
         Self {
             host: "rrc00.ripe.net".to_owned(),
+            seed_file: None,
         }
     }
 }

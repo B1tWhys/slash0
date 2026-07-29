@@ -12,6 +12,11 @@ serde = ["dep:serde"]
 # rust-gpu can't lower, so the shader (default-features = false) leaves it off.
 parse = ["dep:thiserror"]
 
+[lints.rust]
+# The main rust tooling doesn't (yet) know about the spriv target, so the linter complains about
+# an unknown cfg value unless we tell it about spirv explicitly
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv"))'] }
+
 [dependencies]
 bitflags = { version = "2", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }

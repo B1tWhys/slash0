@@ -146,6 +146,41 @@ impl Address {
     }
 }
 
+#[cfg(not(target_arch = "spirv"))]
+impl From<u128> for Address {
+    /// Construct an (ipv6) Address from a u128
+    ///
+    /// # Example
+    /// ```
+    /// use slash0_core::prefix::Address;
+    /// let addr: Address = 0xFFFFFFFF_EEEEEEEE_DDDDDDDD_CCCCCCCC_u128.into();
+    /// assert_eq!(addr.0, [0xFFFFFFFF, 0xEEEEEEEE, 0xDDDDDDDD, 0xCCCCCCCC]);
+    /// ```
+    fn from(value: u128) -> Self {
+        let mut chunks = [0u32; 4];
+
+        for (i, cell) in chunks.iter_mut().enumerate() {
+            *cell = (value >> ((3 - i) * 32) & (!0u32 as u128)) as u32;
+        }
+
+        Self(chunks)
+    }
+}
+
+impl From<u32> for Address {
+    /// Construct an (ipv4) Address from a u32
+    ///
+    /// # Example
+    /// ```
+    /// use slash0_core::prefix::Address;
+    /// let addr: Address = 0xFFFF_EEEEu32.into();
+    /// assert_eq!(addr.0, [0xFFFF_EEEE, 0, 0, 0]);
+    /// ```
+    fn from(value: u32) -> Self {
+        Self([value, 0, 0, 0])
+    }
+}
+
 /// A 128-bit prefix key with an associated bit length.
 ///
 /// Bits at positions `len..128` are guaranteed to be zero when constructed
@@ -154,7 +189,7 @@ impl Address {
 ///
 /// Laid out as `#[repr(C)]` so it can embed in shader-visible structs.
 #[repr(C)]
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Prefix {
     pub bits: [u32; 4],
     pub len: u32,
@@ -178,6 +213,28 @@ impl Prefix {
         assert!(len <= MAX_PREFIX_LEN);
         Self {
             bits: Address(bits).masked(len).0,
+            len,
+        }
+    }
+
+    /// Constructs a prefix from the address, masking any bits past `len` to zero.
+    ///
+    /// Panics if `len > MAX_PREFIX_LEN`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use slash0_core::prefix::Prefix;
+    /// use slash0_core::prefix::Address;
+    ///
+    /// let p = Prefix::from_address(Address([!0, !0, !0, !0]), 8);
+    /// assert_eq!(p.bits, [0xFF00_0000, 0, 0, 0]);
+    /// assert_eq!(p.len, 8);
+    /// ```
+    pub fn from_address(addr: Address, len: u32) -> Self {
+        assert!(len <= MAX_PREFIX_LEN);
+        Self {
+            bits: addr.masked(len).0,
             len,
         }
     }

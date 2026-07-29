@@ -1,13 +1,17 @@
-use std::sync::{Arc, Mutex};
-
+use bgpkit_parser::models::ElemType;
+use bgpkit_parser::{BgpkitParser, Filter};
+use ipnet::IpNet;
 use slash0_core::node::Node;
 use slash0_core::prefix::{IpVersion, Prefix};
-use slash0_core::slab::VecSlab;
+use slash0_core::slab::{Slab, VecSlab};
 use slash0_core::thick::ThickData;
 use slash0_core::timestamp::Timestamp;
 use slash0_core::tree::RadixTree;
+use std::collections::HashMap;
+use std::io::Read;
+use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
-use tracing::{Level, field, info, span, warn};
+use tracing::{Level, field, info, info_span, instrument, span, warn};
 
 use crate::ris_client::messages::{RisMessage, RisMessageBody};
 
@@ -61,6 +65,53 @@ impl RouteTable {
         table
     }
 
+    #[instrument(skip_all)]
+    pub fn add_routes_from(&self, bgpkit_parser: BgpkitParser<Box<dyn Read + Send>>) {
+        let mut v4_routes = HashMap::new();
+        let mut v6_routes = HashMap::new();
+        info!("Begin collecting routes from bgpkit_parser");
+        for route in bgpkit_parser.add_filters(&[Filter::Type(ElemType::ANNOUNCE)]) {
+            let ts = Timestamp::from_sec(route.timestamp);
+            match route.prefix.prefix {
+                IpNet::V4(net) => {
+                    let prefix =
+                        Prefix::from_address(net.addr().to_bits().into(), net.prefix_len() as u32);
+                    let cur_ts = v4_routes.entry(prefix).or_insert(ts);
+                    *cur_ts = (*cur_ts).max(ts);
+                }
+                IpNet::V6(net) => {
+                    let prefix =
+                        Prefix::from_address(net.addr().to_bits().into(), net.prefix_len() as u32);
+                    let cur_ts = v6_routes.entry(prefix).or_insert(ts);
+                    *cur_ts = (*cur_ts).max(ts);
+                }
+            }
+        }
+
+        let v4_route_count = v4_routes.len();
+        let v6_route_count = v4_routes.len();
+        let total_mrt_route_count = v4_routes.len();
+
+        info_span!(
+            "Routes read from MRT, adding them to tries",
+            v4_route_count,
+            v6_route_count,
+            total_mrt_route_count,
+        )
+            .in_scope(|| {
+                self.bulk_insert_routes(IpVersion::V4, v4_routes);
+                self.bulk_insert_routes(IpVersion::V6, v6_routes);
+            });
+    }
+
+    fn bulk_insert_routes(&self, ip_version: IpVersion, routes: HashMap<Prefix, Timestamp>) {
+        let mut trie = self.tree_for(ip_version).lock().expect("Lock corrupted");
+        for (prefix, ts) in routes {
+            // This pattern won't scale when thick data is, well... thicker. Can revisit later though.
+            trie.insert(prefix, ts, ThickData { timestamp: ts }, &mut |_| {});
+        }
+    }
+
     /// Drains `receiver` into the tries until the stream closes. A `Lagged`
     /// receiver logs how many updates it dropped and resumes at the oldest
     /// retained message; the tries then simply carry the resulting gap until the
@@ -104,6 +155,10 @@ impl RouteTable {
                 .set(tree.announced_count() as f64);
             metrics::counter!("slash0_route_table_sweeps_total", "ipVersion" => ip_version)
                 .absolute(tree.sweep_count() as u64);
+            metrics::gauge!("slash0_route_table_slab_size", "ipVersion" => ip_version)
+                .set(tree.slab.size() as f64);
+            metrics::gauge!("slash0_route_table_slab_capacity", "ipVersion" => ip_version)
+                .set(tree.slab.size_capacity() as f64);
         }
     }
 
@@ -156,7 +211,7 @@ impl RouteTable {
         let RisMessageBody::Update(update) = &message.body else {
             return;
         };
-        let ts = Timestamp::from_millis((message.timestamp * 1000.0) as u64);
+        let ts = Timestamp::from_sec(message.timestamp);
 
         let announced = update
             .announcements

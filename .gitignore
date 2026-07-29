@@ -4,3 +4,4 @@
 /crates/client/dist
 /.claude/settings.local.json
 /.idea/
+*.gz
