@@ -66,7 +66,7 @@ impl RouteTable {
     }
 
     #[instrument(skip_all)]
-    pub fn add_routes_from(&self, bgpkit_parser: BgpkitParser<Box<dyn Read + Send>>) {
+    pub fn add_routes_from(&self, bgpkit_parser: BgpkitParser<impl Read>) {
         let mut v4_routes = HashMap::new();
         let mut v6_routes = HashMap::new();
         info!("Begin collecting routes from bgpkit_parser");
@@ -277,6 +277,7 @@ mod tests {
     use super::*;
     use slash0_core::prefix::Address;
     use slash0_core::slab::SlabRead;
+    use std::path::PathBuf;
 
     use crate::ris_client::messages::{Announcement, BgpUpdate};
 
@@ -491,5 +492,22 @@ mod tests {
             &snapshot(&table, IpVersion::V4),
             "10.0.4.0/24"
         ));
+    }
+
+    #[test]
+    fn add_routes_from_file() {
+        let mut file_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        file_path.push("src/test_bview_file.mrt.gz");
+        let reader = oneio::get_reader(file_path.to_str().unwrap()).unwrap();
+
+        let parser = BgpkitParser::from_reader(reader);
+
+        let route_table = RouteTable::new();
+        route_table.add_routes_from(parser);
+
+        let v4_len = route_table.v4.lock().unwrap().announced_count();
+        let v6_len = route_table.v6.lock().unwrap().announced_count();
+
+        assert_eq!(v4_len + v6_len, 100);
     }
 }

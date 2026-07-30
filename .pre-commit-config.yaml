@@ -3,6 +3,7 @@ repos:
     rev: "1.0"
     hooks:
       - id: no-emoji
+        exclude: "crates/server/src/test_bview_file.mrt.gz"
 
   - repo: local
     hooks:
@@ -17,7 +18,7 @@ repos:
         entry: cargo clippy --workspace --all-targets -- -D warnings
         language: system
         pass_filenames: false
-        files: ^(crates/(core|server)/.*\.rs|Cargo\.(toml|lock))$
+        files: ^(crates/(core|server|mrt-util-cli)/.*\.rs|Cargo\.(toml|lock))$
 
       - id: clippy-shader
         name: cargo clippy (shader)
