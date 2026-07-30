@@ -1,12 +1,6 @@
 mod config;
 mod http;
-// Consumed by the route table below; also carries protocol types (e.g.
-// client-to-server messages) that aren't exercised yet.
-#[allow(dead_code)]
 mod ris_client;
-// Ingest is wired up in main(); subscribe() stays unused until the websocket
-// layer serves snapshots.
-#[allow(dead_code)]
 mod route_table;
 
 use std::path::PathBuf;
@@ -16,13 +10,13 @@ use std::time::Duration;
 use anyhow::Context;
 use bgpkit_parser::BgpkitParser;
 use clap::Parser;
-use metrics_exporter_prometheus::PrometheusBuilder;
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
-use crate::config::LoggingConfig;
+use crate::config::{Config, LoggingConfig};
 use crate::ris_client::messages::{BgpMessageType, SubscriptionFilters};
 use crate::route_table::RouteTable;
 
@@ -40,55 +34,9 @@ async fn main() -> anyhow::Result<()> {
     let config = config::load(cli.config)?;
     init_tracing(&config.logging)?;
 
-    let metrics_handle = PrometheusBuilder::new()
-        .install_recorder()
-        .context("failed to install Prometheus recorder")?;
-    // install_recorder() does not spawn upkeep the way install() does, so drive
-    // it ourselves to keep the recorder's state bounded over time.
-    tokio::spawn({
-        let handle = metrics_handle.clone();
-        async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                handle.run_upkeep();
-            }
-        }
-    });
+    let metrics_handle = setup_prometheus()?;
 
-    let ris = ris_client::stream::subscribe(SubscriptionFilters {
-        host: Some(config.ris.host.clone()),
-        message_type: Some(BgpMessageType::Update),
-        ..Default::default()
-    })
-    .await
-    .with_context(|| format!("failed to subscribe to RIS Live host {}", config.ris.host))?;
-    // Ingest runs in the background regardless of this handle; it also feeds the
-    // trie-size metrics below and the websocket layer once the wire protocol is
-    // settled.
-    info!(host = %config.ris.host, "Subscribed to RIS Live updates");
-
-    let route_table = RouteTable::spawn(ris.subscribe());
-
-    if let Some(seed_file_path) = &config.ris.seed_file {
-        info!(seed_file_path, "Seeding from file");
-        let parser = BgpkitParser::from_reader(oneio::get_reader(seed_file_path)?);
-        route_table.add_routes_from(parser);
-    } else {
-        info!("No seed file configured, skipping seeding");
-    }
-
-    tokio::spawn({
-        let route_table = Arc::clone(&route_table);
-        async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                route_table.record_metrics();
-                route_table.sweep();
-            }
-        }
-    });
+    let _route_table = init_route_table(&config).await?;
 
     let addr = config.server.socket_addr();
     let app = http::router(&config, metrics_handle);
@@ -116,6 +64,63 @@ fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {
         .try_init()
         .map_err(|err| anyhow::anyhow!("failed to initialize tracing: {err}"))?;
     Ok(())
+}
+
+/// Initialize prometheus metrics recorder + task to periodically run upkeep to avoid memory
+/// leaks
+fn setup_prometheus() -> anyhow::Result<PrometheusHandle> {
+    let metrics_handle = PrometheusBuilder::new()
+        .install_recorder()
+        .context("failed to install Prometheus recorder")?;
+    // install_recorder() does not spawn upkeep the way install() does, so drive
+    // it ourselves to keep the recorder's state bounded over time.
+    tokio::spawn({
+        let handle = metrics_handle.clone();
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                handle.run_upkeep();
+            }
+        }
+    });
+    Ok(metrics_handle)
+}
+
+/// Create a route table, bootstrapped with data and subscribed to RIS-live to stay up to date
+async fn init_route_table(config: &Config) -> anyhow::Result<Arc<RouteTable>> {
+    let ris = ris_client::stream::subscribe(SubscriptionFilters {
+        host: Some(config.ris.host.clone()),
+        message_type: Some(BgpMessageType::Update),
+        ..Default::default()
+    })
+    .await
+    .with_context(|| format!("failed to subscribe to RIS Live host {}", config.ris.host))?;
+
+    info!(host = %config.ris.host, "Subscribed to RIS Live updates");
+
+    let route_table = RouteTable::spawn(ris.subscribe());
+
+    if let Some(seed_file_path) = &config.ris.seed_file {
+        info!(seed_file_path, "Seeding from file");
+        let parser = BgpkitParser::from_reader(oneio::get_reader(seed_file_path)?);
+        route_table.add_routes_from(parser);
+    } else {
+        info!("No seed file configured, skipping seeding");
+    }
+
+    tokio::spawn({
+        let route_table = Arc::clone(&route_table);
+        async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            loop {
+                interval.tick().await;
+                route_table.record_metrics();
+                route_table.sweep();
+            }
+        }
+    });
+    Ok(route_table)
 }
 
 async fn shutdown_signal() {

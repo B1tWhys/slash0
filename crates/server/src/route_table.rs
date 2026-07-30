@@ -256,6 +256,7 @@ impl RouteTable {
     /// and the receiver's stream resumes exactly where the snapshot ends.
     ///
     /// Blocks that family's ingest for the duration of the (cheap) slab clone.
+    #[allow(dead_code)]
     pub fn subscribe(
         &self,
         version: IpVersion,

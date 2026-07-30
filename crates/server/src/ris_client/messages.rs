@@ -17,6 +17,7 @@ type IpAddr = String;
 /// Messages the client sends to the server.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum ClientMessage {
     RisSubscribe(RisSubscribe),
     RisUnsubscribe(SubscriptionFilters),
@@ -42,6 +43,7 @@ pub enum ServerMessage {
 /// Payload of a `ris_subscribe` message: a set of filters plus socket options.
 #[derive(Serialize, Deserialize, Debug, Clone, Default)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct RisSubscribe {
     #[serde(flatten)]
     pub filters: SubscriptionFilters,
