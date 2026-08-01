@@ -1,7 +1,7 @@
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 
-pub async fn start(canvas_id: &str) -> Result<(), JsValue> {
+pub async fn _start(canvas_id: &str) -> Result<(), JsValue> {
     let canvas = web_sys::window()
         .unwrap()
         .document()

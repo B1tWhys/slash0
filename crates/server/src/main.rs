@@ -36,10 +36,10 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics_handle = setup_prometheus()?;
 
-    let _route_table = init_route_table(&config).await?;
+    let route_table = init_route_table(&config).await?;
 
     let addr = config.server.socket_addr();
-    let app = http::router(&config, metrics_handle);
+    let app = http::router(&config, metrics_handle, route_table);
 
     let listener = tokio::net::TcpListener::bind(addr)
         .await
