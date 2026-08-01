@@ -5,7 +5,7 @@ edition.workspace = true
 
 [features]
 default = ["alloc"]
-alloc = []
+alloc = ["dep:hashbrown"]
 thick = ["alloc"]
 serde = ["dep:serde", "bitflags/serde"]
 # CIDR-string parsing on the CPU. Pulls in a data-carrying error enum that
@@ -19,6 +19,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv
 
 [dependencies]
 bitflags = { version = "2", default-features = false }
+hashbrown = { version = "0.17.1", optional = true }
 macro_rules_attribute = "0.2.3"
 serde = { version = "1", default-features = false, features = ["derive"], optional = true }
 thiserror = { version = "2.0.19", default-features = false, optional = true }

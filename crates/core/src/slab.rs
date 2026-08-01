@@ -24,6 +24,7 @@ mod vec_backed {
     use super::*;
     use alloc::vec::Vec;
     use core::num::NonZeroU32;
+    use hashbrown::HashSet;
 
     #[derive(Clone)]
     pub struct VecSlab<T> {
@@ -97,6 +98,44 @@ mod vec_backed {
         }
         fn size(&self) -> usize {
             size_of::<T>() * self.entries.len()
+        }
+    }
+
+    impl<'a, T> IntoIterator for &'a VecSlab<T> {
+        type Item = &'a T;
+        type IntoIter = VecSlabIterator<'a, T>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            VecSlabIterator::new(self)
+        }
+    }
+
+    pub struct VecSlabIterator<'a, T> {
+        entries: &'a Vec<T>,
+        free_set: HashSet<usize>,
+        cur_idx: usize,
+    }
+
+    impl<'a, T> VecSlabIterator<'a, T> {
+        fn new(slab: &'a VecSlab<T>) -> Self {
+            Self {
+                entries: &slab.entries,
+                free_set: HashSet::from_iter(slab.free_list.iter().map(|i| (*i).get() as usize)),
+                cur_idx: 0,
+            }
+        }
+    }
+
+    impl<'a, T> Iterator for VecSlabIterator<'a, T> {
+        type Item = &'a T;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            self.cur_idx += 1;
+            while self.free_set.contains(&self.cur_idx) && self.cur_idx < self.entries.len() {
+                self.cur_idx += 1;
+            }
+
+            self.entries.get(self.cur_idx)
         }
     }
 }
@@ -214,5 +253,26 @@ mod tests {
         slab.free(a);
         assert_eq!(slab.alloc(), Some(a));
         assert_eq!(slab.alloc(), None);
+    }
+
+    #[test]
+    fn test_iter_over_slab() {
+        let mut slab = VecSlab::<alloc::string::String>::new();
+        let a = slab.alloc().unwrap();
+        let b = slab.alloc().unwrap();
+        let c = slab.alloc().unwrap();
+
+        *slab.get_mut(a) = "a".into();
+        *slab.get_mut(b) = "b".into();
+        *slab.get_mut(c) = "c".into();
+
+        slab.free(b);
+
+        let mut collector = alloc::vec![];
+        for i in &slab {
+            collector.push(i);
+        }
+
+        assert_eq!(collector, alloc::vec!["a", "c"]);
     }
 }
