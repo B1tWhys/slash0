@@ -23,8 +23,8 @@ pub const MAX_PREFIX_LEN: u32 = 128;
 /// Kept out of the trie node payload -- the trie is family-agnostic -- but needed
 /// by consumers that maintain separate v4/v6 tries and by any wire encoding. The
 /// discriminants match the IP version numbers so the tag can serialize directly.
-#[derive(Copy, Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[apply(Serde!)]
+#[derive(Copy, Clone)]
 #[repr(u8)]
 pub enum IpVersion {
     V4 = 4,
@@ -38,6 +38,7 @@ pub enum IpVersion {
 /// length) and the value the trie walk and Hilbert mapping navigate. Laid out
 /// `#[repr(transparent)]` so it shares `[u32; 4]`'s layout and can embed in
 /// shader-visible structs or be memcpy'd into GPU buffers.
+#[apply(Serde!)]
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Address(pub [u32; 4]);
@@ -188,6 +189,7 @@ impl From<u32> for Address {
 /// semantics compare bytewise-equal.
 ///
 /// Laid out as `#[repr(C)]` so it can embed in shader-visible structs.
+#[apply(Serde!)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Prefix {

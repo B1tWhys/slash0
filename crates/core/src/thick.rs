@@ -2,6 +2,7 @@ use crate::node::NodeData;
 use crate::thin::ThinData;
 use crate::timestamp::Timestamp;
 
+#[apply(Serde!)]
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ThickData {
     pub timestamp: Timestamp,

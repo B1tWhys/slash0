@@ -1,6 +1,7 @@
 use crate::node::{NodeData, ThinNodeData};
 use crate::timestamp::Timestamp;
 
+#[apply(Serde!)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ThinData {

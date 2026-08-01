@@ -5,6 +5,7 @@ use core::num::NonZeroU32;
 pub type NodeIdx = NonZeroU32;
 
 bitflags::bitflags! {
+    #[apply(Serde!)]
     #[repr(transparent)]
     #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
     pub struct NodeFlags: u32 {
@@ -39,8 +40,9 @@ pub trait NodeData: Default {
 /// implements this; `ThickData` does not.
 pub trait ThinNodeData: NodeData + Copy {}
 
-#[repr(C)]
+#[apply(Serde!)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[repr(C)]
 pub struct Node<D> {
     pub children: [Option<NodeIdx>; 2],
     pub prefix: Prefix,
