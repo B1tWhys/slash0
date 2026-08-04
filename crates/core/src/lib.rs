@@ -18,3 +18,5 @@ pub mod tree;
 
 #[cfg(feature = "thick")]
 pub mod thick;
+#[cfg(feature = "serde")]
+pub mod wire;

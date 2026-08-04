@@ -21,5 +21,5 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_arch, values("spirv
 bitflags = { version = "2", default-features = false }
 hashbrown = { version = "0.17.1", optional = true }
 macro_rules_attribute = "0.2.3"
-serde = { version = "1", default-features = false, features = ["derive"], optional = true }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 thiserror = { version = "2.0.19", default-features = false, optional = true }

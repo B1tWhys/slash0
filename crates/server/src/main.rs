@@ -1,8 +1,14 @@
+#[macro_use]
+extern crate macro_rules_attribute;
+
 mod config;
+mod connection;
 mod http;
 mod ris_client;
 mod route_table;
+mod socket_adapter;
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,10 +52,13 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind {addr}"))?;
     info!(%addr, "listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .context("server error")?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .context("server error")?;
 
     Ok(())
 }

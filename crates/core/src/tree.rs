@@ -1,7 +1,13 @@
 use crate::node::{Node, NodeData, NodeFlags, NodeIdx};
 use crate::prefix::{Address, MAX_PREFIX_LEN, Prefix};
+#[cfg(feature = "thick")]
+use crate::slab::VecSlab;
 use crate::slab::{Slab, SlabRead};
+#[cfg(feature = "thick")]
+use crate::thick::ThickData;
+use crate::thin::ThinData;
 use crate::timestamp::Timestamp;
+use core::fmt::{Debug, Formatter};
 use core::marker::PhantomData;
 
 /// Path-compressed binary radix trie keyed on 128-bit prefixes, generic over
@@ -21,6 +27,7 @@ use core::marker::PhantomData;
 /// Cloning deep-copies the backing slab (requires `S: Clone`), yielding a tree
 /// fully decoupled from the original -- the basis for handing out owned
 /// snapshots.
+#[apply(Serde!)]
 #[derive(Clone)]
 pub struct RadixTree<D: NodeData, S: SlabRead<Node<D>>> {
     pub slab: S,
@@ -494,6 +501,43 @@ impl<D: NodeData, S: Slab<Node<D>>> RadixTree<D, S> {
                 self.slab.get_mut(parent).children[slot] = value;
                 dirty(parent);
             }
+        }
+    }
+}
+
+impl<D: Debug + NodeData, S: SlabRead<Node<D>>> Debug for RadixTree<D, S> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RadixTree")
+            .field("root_idx", &self.root)
+            .field("root", &self.root.map(|i| self.slab.get(i)))
+            .field("announced_count", &self.announced_count)
+            .field("sweep_count", &self.sweep_count)
+            .finish()
+    }
+}
+
+#[cfg(feature = "thick")]
+impl RadixTree<ThinData, VecSlab<Node<ThinData>>> {
+    /// Create a thin tree out of a thick tree. The thick tree is basically cloned, the resulting
+    /// thin tree is a fully owned copy of the data with no references back to the thick tree.
+    ///
+    /// Note: The sweep_count is reset to 0 on the thin tree.
+    pub fn from_thick_tree(thick_tree: &RadixTree<ThickData, VecSlab<Node<ThickData>>>) -> Self {
+        let thin_slab = VecSlab::with_entries_mapped_from(&thick_tree.slab, |thick_node| Node {
+            children: thick_node.children,
+            prefix: thick_node.prefix,
+            flags: thick_node.flags,
+            data: ThinData {
+                timestamp: thick_node.data.timestamp,
+            },
+        });
+
+        RadixTree {
+            slab: thin_slab,
+            root: thick_tree.root,
+            announced_count: thick_tree.announced_count,
+            sweep_count: 0,
+            _phantom: PhantomData,
         }
     }
 }

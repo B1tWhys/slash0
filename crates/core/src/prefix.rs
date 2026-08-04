@@ -24,7 +24,7 @@ pub const MAX_PREFIX_LEN: u32 = 128;
 /// by consumers that maintain separate v4/v6 tries and by any wire encoding. The
 /// discriminants match the IP version numbers so the tag can serialize directly.
 #[apply(Serde!)]
-#[derive(Copy, Clone)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 #[repr(u8)]
 pub enum IpVersion {
     V4 = 4,

@@ -1,16 +1,16 @@
 use crate::config::Config;
+use crate::connection::Connection;
 use crate::route_table::RouteTable;
+use crate::socket_adapter::WebSocketAdapter;
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::ws::{WebSocket, WebSocketUpgrade};
+use axum::extract::{ConnectInfo, State};
 use axum::response::Response;
 use axum::routing::{any, get};
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Serialize;
-use slash0_core::node::Node;
-use slash0_core::prefix::IpVersion;
-use slash0_core::thin::ThinData;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::ServiceBuilder;
 use tower_http::services::ServeDir;
@@ -60,43 +60,14 @@ async fn health() -> Json<Health> {
 async fn ws_handler(
     upgrade: WebSocketUpgrade,
     State(route_table): State<Arc<RouteTable>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
-    upgrade.on_upgrade(move |ws| handle_socket(ws, route_table))
+    info!("Handling ws request from: {addr}");
+    upgrade.on_upgrade(move |ws| handle_socket(ws, route_table, addr))
 }
 
-async fn handle_socket(mut socket: WebSocket, route_table: Arc<RouteTable>) {
-    metrics::counter!("slash0_ws_connections_total").increment(1);
-    info!("websocket client connected");
-
-    let (tree, _stream) = route_table.subscribe(IpVersion::V4);
-    let slab = &tree.slab;
-
-    let thin_nodes: Vec<_> = slab
-        .into_iter()
-        .map(|thick_node| Node {
-            children: thick_node.children,
-            prefix: thick_node.prefix,
-            flags: thick_node.flags,
-            data: ThinData {
-                timestamp: thick_node.data.timestamp,
-            },
-        })
-        .collect();
-
-    let slab_msg = Message::Binary(
-        serde_json::to_vec(&thin_nodes)
-            .expect("Failed to serialize thin nodes")
-            .into(),
-    );
-
-    socket.send(slab_msg).await.expect("Failed to send message");
-
-    while let Some(Ok(message)) = socket.recv().await {
-        info!(?message, "Message received");
-        if let Message::Close(_) = message {
-            break;
-        }
-    }
-
-    info!("websocket client disconnected");
+async fn handle_socket(socket: WebSocket, route_table: Arc<RouteTable>, client_addr: SocketAddr) {
+    let socket = WebSocketAdapter::new(socket);
+    let conn = Connection::new();
+    conn.run(socket, route_table, client_addr).await
 }

@@ -26,6 +26,7 @@ mod vec_backed {
     use core::num::NonZeroU32;
     use hashbrown::HashSet;
 
+    #[apply(Serde!)]
     #[derive(Clone)]
     pub struct VecSlab<T> {
         entries: Vec<T>,
@@ -46,6 +47,37 @@ mod vec_backed {
                 entries,
                 free_list: Vec::new(),
                 max_capacity: cap,
+            }
+        }
+    }
+
+    impl<T> VecSlab<T> {
+        /// Constructs a new VecSlab populated with the entries of [other], passed through a mapping
+        /// function [mapper]
+        ///
+        /// Note: currently all entries (including ones in the free list) in [other] are mapped. A
+        /// future optimization could be to skip those, but I suspect that this big sequential memory
+        /// copy is actually quite fast in practice so it's prob not necessary
+        ///
+        /// # Examples
+        /// ```
+        /// use slash0_core::slab::{VecSlab, Slab, SlabRead};
+        /// let mut original = VecSlab::new();
+        /// let a = original.alloc().unwrap();
+        /// *original.get_mut(a) = "foo".to_string();
+        ///
+        /// let new = VecSlab::with_entries_mapped_from(&original, |i| i.to_uppercase());
+        /// assert_eq!(new.get(a), "FOO");
+        /// ```
+        pub fn with_entries_mapped_from<U, F>(other: &VecSlab<U>, mapper: F) -> Self
+        where
+            F: FnMut(&U) -> T,
+        {
+            let entries = other.entries.iter().map(mapper).collect();
+            Self {
+                entries,
+                free_list: other.free_list.clone(),
+                max_capacity: other.max_capacity,
             }
         }
     }

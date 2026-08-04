@@ -1,9 +1,11 @@
 //! Rust type definitions for the RIS Live protocol.
 //! https://ris-live.ripe.net/manual/
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
+use slash0_core::prefix::Prefix;
+use slash0_core::timestamp::Timestamp;
+use slash0_core::wire::ThinBgpUpdate;
+use std::collections::HashMap;
 
 /// Textual IP address as delivered by RIS Live. Left as a string because some
 /// fields (e.g. a next hop) carry a comma-joined pair of addresses rather than
@@ -203,6 +205,29 @@ pub struct BgpUpdate {
     /// Withdrawn CIDR prefixes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub withdrawals: Option<Vec<String>>,
+}
+
+impl BgpUpdate {
+    pub fn to_thin_updates(
+        &self,
+        ts: Timestamp,
+        ip_version: slash0_core::prefix::IpVersion,
+    ) -> Vec<ThinBgpUpdate> {
+        let announced_prefixes = self
+            .announcements
+            .iter()
+            .flatten()
+            .flat_map(|announcement| &announcement.prefixes);
+
+        let withdrawn_prefixes = self.withdrawals.iter().flatten();
+
+        announced_prefixes
+            .chain(withdrawn_prefixes)
+            .flat_map(|prefix| Prefix::parse_cidr(prefix))
+            .filter(|(version, _)| version == &ip_version)
+            .map(|(_, prefix)| ThinBgpUpdate::new(prefix, ts))
+            .collect()
+    }
 }
 
 /// One element of an AS_PATH: a single ASN, or an AS_SET (ascending order).
