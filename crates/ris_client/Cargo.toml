@@ -1,0 +1,16 @@
+[package]
+name = "ris_client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+slash0-core = { workspace = true, features = ["alloc", "serde", "parse"] }
+serde = "1.0.229"
+serde_json = "1.0.151"
+anyhow = "1.0.104"
+futures = "0.3.33"
+tokio = "1.53.1"
+tokio-util = { version = "0.7.19", features = ["codec", "io"] }
+tracing = "0.1.44"
+reqwest = { version = "0.13.4", features = ["stream"] }
+metrics = "0.24.6"

@@ -4,7 +4,7 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::io::StreamReader;
 use tracing::{debug, info, warn};
 
-use crate::ris_client::messages::{RisMessage, RisMessageBody, ServerMessage, SubscriptionFilters};
+use crate::messages::{RisMessage, RisMessageBody, ServerMessage, SubscriptionFilters};
 
 /// RIS Live newline-delimited JSON streaming endpoint.
 const RIS_LIVE_STREAM_URL: &str = "https://ris-live.ripe.net/v1/stream/?format=json";

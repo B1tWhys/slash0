@@ -1,7 +1,9 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/core", "crates/mrt-util-cli",
+    "crates/core",
+    "crates/mrt-util-cli",
+    "crates/ris_client",
     "crates/server",
 ]
 exclude = [
@@ -15,3 +17,4 @@ edition = "2024"
 
 [workspace.dependencies]
 slash0-core = { path = "crates/core", default-features = false }
+ris_client = { path = "crates/ris_client", default-features = false }

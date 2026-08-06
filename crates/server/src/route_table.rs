@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tracing::{Level, field, info, info_span, instrument, span, warn};
 
-use crate::ris_client::messages::{RisMessage, RisMessageBody};
+use ris_client::messages::{RisMessage, RisMessageBody};
 
 /// Server-side radix trie carrying full BGP metadata per node.
 type ThickTree = RadixTree<ThickData, VecSlab<Node<ThickData>>>;
@@ -275,11 +275,10 @@ impl RouteTable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ris_client::messages::{Announcement, BgpUpdate};
     use slash0_core::prefix::Address;
     use slash0_core::slab::SlabRead;
     use std::path::PathBuf;
-
-    use crate::ris_client::messages::{Announcement, BgpUpdate};
 
     fn message(timestamp: f64, body: RisMessageBody) -> RisMessage {
         RisMessage {

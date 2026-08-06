@@ -1,6 +1,6 @@
-use crate::ris_client::messages::{RisMessage, RisMessageBody};
 use crate::route_table::RouteTable;
 use crate::socket_adapter::{SocketAdapter, WebSocketAdapter};
+use ris_client::messages::{RisMessage, RisMessageBody};
 use slash0_core::prefix::IpVersion;
 use slash0_core::timestamp::Timestamp;
 use slash0_core::tree::RadixTree;

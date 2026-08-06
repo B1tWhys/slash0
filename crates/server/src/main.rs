@@ -4,7 +4,6 @@ extern crate macro_rules_attribute;
 mod config;
 mod connection;
 mod http;
-mod ris_client;
 mod route_table;
 mod socket_adapter;
 
@@ -23,8 +22,8 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::config::{Config, LoggingConfig};
-use crate::ris_client::messages::{BgpMessageType, SubscriptionFilters};
 use crate::route_table::RouteTable;
+use ris_client::messages::{BgpMessageType, SubscriptionFilters};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "slash0 BGP visualization server")]
