@@ -48,6 +48,10 @@ pub struct RisConfig {
     ///
     /// Download files from: https://ris.ripe.net/docs/mrt/
     pub seed_file: Option<String>,
+
+    /// File with newline separated JSON RIS messages (for offline development). These
+    /// will just be looped forever
+    pub mock_events_file: Option<String>,
 }
 
 impl Default for ServerConfig {
@@ -73,6 +77,7 @@ impl Default for RisConfig {
         Self {
             host: "rrc00.ripe.net".to_owned(),
             seed_file: None,
+            mock_events_file: None,
         }
     }
 }
