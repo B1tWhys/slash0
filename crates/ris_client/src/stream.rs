@@ -25,7 +25,7 @@ const CHANNEL_CAPACITY: usize = 10_000;
 /// attached.
 pub async fn subscribe(
     filters: SubscriptionFilters,
-) -> anyhow::Result<broadcast::Sender<RisMessage>> {
+) -> anyhow::Result<broadcast::Receiver<RisMessage>> {
     let subscribe_header = serde_json::to_string(&filters)?;
     debug!(%subscribe_header, "subscribing to RIS Live");
 
@@ -41,7 +41,7 @@ pub async fn subscribe(
     let byte_stream = response.bytes_stream().map_err(std::io::Error::other);
     let mut records = FramedRead::new(StreamReader::new(byte_stream), LinesCodec::new());
 
-    let (tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+    let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
     let ingest_tx = tx.clone();
     tokio::spawn(async move {
         while let Some(record) = records.next().await {
@@ -70,7 +70,7 @@ pub async fn subscribe(
         info!("RIS Live stream ended");
     });
 
-    Ok(tx)
+    Ok(rx)
 }
 
 /// Counts every relayed message, plus the announced and withdrawn prefixes

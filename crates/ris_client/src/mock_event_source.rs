@@ -34,6 +34,7 @@ pub async fn subscribe_from_file(
         });
 
     let (tx, rx) = broadcast::channel::<RisMessage>(1000);
+    let ingest_tx = tx.clone();
     tokio::spawn(async move {
         let mut last_timestamp_sec: Option<f64> = None;
         tokio::pin!(messages);
@@ -45,7 +46,7 @@ pub async fn subscribe_from_file(
                 }
             }
             last_timestamp_sec = Some(message.timestamp);
-            tx.send(message).unwrap();
+            ingest_tx.send(message).unwrap();
         }
     });
 
@@ -75,9 +76,9 @@ mod tests {
         let mut path = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         path.push("src/sample_messages.json");
 
-        let mut stream = subscribe_from_file(&path, false).await.unwrap();
+        let mut rx = subscribe_from_file(&path, false).await.unwrap();
         let mut messages = vec![];
-        while let Ok(msg) = stream.recv().await {
+        while let Ok(msg) = rx.recv().await {
             messages.push(msg);
         }
 

@@ -9,6 +9,7 @@ mod socket_adapter;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,17 +98,27 @@ fn setup_prometheus() -> anyhow::Result<PrometheusHandle> {
 
 /// Create a route table, bootstrapped with data and subscribed to RIS-live to stay up to date
 async fn init_route_table(config: &Config) -> anyhow::Result<Arc<RouteTable>> {
-    let ris = ris_client::stream::subscribe(SubscriptionFilters {
-        host: Some(config.ris.host.clone()),
-        message_type: Some(BgpMessageType::Update),
-        ..Default::default()
-    })
-    .await
-    .with_context(|| format!("failed to subscribe to RIS Live host {}", config.ris.host))?;
+    let ris = if let Some(ref mock_ris_config) = config.ris.mock_stream_config {
+        let path = PathBuf::from_str(&mock_ris_config.mock_events_file).with_context(|| {
+            format!(
+                "{} is not a valid path for the mock events",
+                mock_ris_config.mock_events_file
+            )
+        })?;
+        ris_client::mock_event_source::subscribe_from_file(&path, true).await?
+    } else {
+        ris_client::stream::subscribe(SubscriptionFilters {
+            host: Some(config.ris.host.clone()),
+            message_type: Some(BgpMessageType::Update),
+            ..Default::default()
+        })
+        .await
+        .with_context(|| format!("failed to subscribe to RIS Live host {}", config.ris.host))?
+    };
 
     info!(host = %config.ris.host, "Subscribed to RIS Live updates");
 
-    let route_table = RouteTable::spawn(ris.subscribe());
+    let route_table = RouteTable::spawn(ris);
 
     if let Some(seed_file_path) = &config.ris.seed_file {
         info!(seed_file_path, "Seeding from file");
