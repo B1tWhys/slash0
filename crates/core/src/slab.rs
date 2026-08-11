@@ -16,6 +16,7 @@ pub trait Slab<T>: SlabRead<T> {
     fn free(&mut self, idx: NodeIdx);
     /// Allocated capacity for the slab in bytes ([size] is the size of the objects in the vec)
     fn size_capacity(&self) -> usize;
+    /// Bytes actually being used by nodes in the vec
     fn size(&self) -> usize;
 }
 

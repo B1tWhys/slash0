@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use slash0_core::prefix::Prefix;
 use slash0_core::timestamp::Timestamp;
-use slash0_core::wire::ThinBgpUpdate;
+use slash0_core::wire::{ThinBgpUpdate, UpdateType};
 use std::collections::HashMap;
 
 /// Textual IP address as delivered by RIS Live. Left as a string because some
@@ -217,15 +217,22 @@ impl BgpUpdate {
             .announcements
             .iter()
             .flatten()
-            .flat_map(|announcement| &announcement.prefixes);
+            .flat_map(|announcement| &announcement.prefixes)
+            .map(|prefix| (prefix, UpdateType::ANNOUNCE));
 
-        let withdrawn_prefixes = self.withdrawals.iter().flatten();
+        let withdrawn_prefixes = self
+            .withdrawals
+            .iter()
+            .flatten()
+            .map(|prefix| (prefix, UpdateType::WITHDRAW));
 
         announced_prefixes
             .chain(withdrawn_prefixes)
-            .flat_map(|prefix| Prefix::parse_cidr(prefix))
-            .filter(|(version, _)| version == &ip_version)
-            .map(|(_, prefix)| ThinBgpUpdate::new(prefix, ts))
+            .flat_map(|(prefix, update_type)| {
+                Prefix::parse_cidr(prefix).map(|prefix| (prefix, update_type))
+            })
+            .filter(|((version, _), _)| version == &ip_version)
+            .map(|((_, prefix), update_type)| ThinBgpUpdate::new(prefix, ts, update_type))
             .collect()
     }
 }

@@ -21,12 +21,24 @@ pub enum Slash0Message {
 #[apply(Serde!)]
 #[derive(Debug)]
 pub struct ThinBgpUpdate {
-    prefix: Prefix,
-    timestamp: Timestamp,
+    pub prefix: Prefix,
+    pub timestamp: Timestamp,
+    pub update_type: UpdateType,
+}
+
+#[apply(Serde!)]
+#[derive(Debug)]
+pub enum UpdateType {
+    ANNOUNCE,
+    WITHDRAW,
 }
 
 impl ThinBgpUpdate {
-    pub fn new(prefix: Prefix, timestamp: Timestamp) -> Self {
-        Self { prefix, timestamp }
+    pub fn new(prefix: Prefix, timestamp: Timestamp, update_type: UpdateType) -> Self {
+        Self {
+            prefix,
+            timestamp,
+            update_type,
+        }
     }
 }

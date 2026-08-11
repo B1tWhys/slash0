@@ -31,8 +31,12 @@ impl SocketAdapter for WebSocketAdapter {
             let raw_msg = result.context("Failed to read message from socket")?;
             let data = raw_msg.into_data();
 
-            let message: Slash0Message = postcard::from_bytes(&data)
-                .with_context(|| format!("Failed to deserialize message: {:?}", &data[..500]))?;
+            let message: Slash0Message = postcard::from_bytes(&data).with_context(|| {
+                format!(
+                    "Failed to deserialize message: {:?}",
+                    data.slice(..data.len().min(500))
+                )
+            })?;
             info!(?message, "Received Slash0WebsocketMessage");
             return Ok(Some(message));
         }

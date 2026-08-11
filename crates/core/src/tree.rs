@@ -5,6 +5,7 @@ use crate::slab::VecSlab;
 use crate::slab::{Slab, SlabRead};
 #[cfg(feature = "thick")]
 use crate::thick::ThickData;
+#[cfg(feature = "thick")]
 use crate::thin::ThinData;
 use crate::timestamp::Timestamp;
 use core::fmt::{Debug, Formatter};

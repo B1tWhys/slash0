@@ -43,7 +43,7 @@ pub fn fs_main(uv: Vec2, out_color: &mut Vec4) {
 
     // Sweep the hue several times over the full curve so Hilbert locality shows
     // up as tight, fast-repeating bands rather than one slow gradient.
-    let cycles = 20.0;
+    let cycles = 1.0;
     let swept = distance * cycles;
     let h = swept - (swept as u32 as f32); // fractional part, in [0, 1)
 
