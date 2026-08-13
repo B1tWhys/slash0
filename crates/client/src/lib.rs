@@ -1,24 +1,32 @@
-use anyhow::{Context, bail};
+use crate::render::{RenderState, start};
+use anyhow::{Context, anyhow, bail};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
 use gloo_net::websocket::Message;
 use gloo_net::websocket::futures::WebSocket;
-use log::{debug, info, warn};
+use log::warn;
 use slash0_core::node::Node;
 use slash0_core::prefix::IpVersion;
-use slash0_core::slab::{Slab, VecSlab};
+use slash0_core::slab::VecSlab;
 use slash0_core::thin::ThinData;
 use slash0_core::tree::RadixTree;
 use slash0_core::wire::{Slash0Message, UpdateType};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-use wasm_bindgen::prelude::wasm_bindgen;
+use thiserror::Error;
+use wasm_bindgen::JsValue;
 use wasm_bindgen_futures::spawn_local;
-use web_sys::js_sys::{Array, Promise};
-use web_sys::window;
+
+use crate::stats_for_nerds::StatsState;
+use wasm_bindgen::prelude::*;
 
 mod render;
+mod stats_for_nerds;
+pub mod time;
+
+const CANVAS_ELEMENT_ID: &str = "slash0";
+
+pub type Tree = RadixTree<ThinData, VecSlab<Node<ThinData>>>;
+pub type Tx = SplitSink<WebSocket, Message>;
+pub type Rx = SplitStream<WebSocket>;
 
 fn set_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
@@ -31,161 +39,228 @@ pub fn main() {
     set_panic_hook();
     console_log::init_with_level(log::Level::Info).ok();
     spawn_local(async {
-        if let Err(err) = render::_start("slash0").await {
-            log::error!("render init failed: {err:?}");
+        run().await;
+    });
+}
+
+async fn run() {
+    let mut state = ClientState::Initializing(InitializingState {});
+
+    let mut stats = StatsState::default();
+    loop {
+        if stats.is_time_for_report() {
+            stats.report(&state);
         }
-    });
-    garbo_main();
+        state = match state {
+            ClientState::Initializing(s) => s.run().await,
+            ClientState::Connecting(s) => s.run().await,
+            ClientState::Connected(s) => s.run().await,
+            ClientState::Synchronizing(s) => s.run().await,
+            ClientState::Subscribed(s) => s.run(&mut stats).await,
+            ClientState::Error(_) => break,
+        }
+        .unwrap_or_else(ClientState::Error)
+    }
 }
 
-// TODO: Everything below this is just garbage experimentation while I figure out how wasm works. I'll need
-// to be rewritten properly, i'm sure
-
-const TREE_STATS_ELEMENT_ID: &str = "tree-stats";
-fn display_metrics(tree: &Mutex<Tree>, metrics: &Arc<MetricsState>) -> anyhow::Result<()> {
-    let tree = tree.lock().unwrap();
-    let document = web_sys::window()
-        .context("Couldn't get window")?
-        .document()
-        .context("Couldn't get document")?;
-    let tree_stats = document.get_element_by_id(TREE_STATS_ELEMENT_ID).unwrap();
-
-    let elements = [
-        format!(
-            "Update count: {}",
-            metrics.total_updates.load(Ordering::SeqCst)
-        ),
-        format!("Node count: {}", tree.slab.size()),
-        format!("Slab size (Bytes): {}", tree.slab.size_capacity()),
-        format!("Sweep count: {}", tree.sweep_count()),
-        format!(
-            "Reclaimed nodes count: {}",
-            metrics.reclaimed_nodes.load(Ordering::SeqCst)
-        ),
-    ]
-    .map(|s| {
-        let elem = document.create_element("li").unwrap();
-        elem.set_text_content(Some(&s));
-        elem
-    });
-
-    tree_stats.replace_children_with_node(&(Array::from_iter(elements)));
-
-    Ok(())
+pub enum ClientState {
+    /// The canvas/GPU hasn't been setup yet
+    Initializing(InitializingState),
+    /// The websocket connection is not open yet
+    Connecting(ConnectingState),
+    /// The websocket is connected, but we don't have a tree pulled down yet and we're not
+    /// receiving events (and if we do, for some reason, they're ignored)
+    Connected(ConnectedState),
+    /// We've subscribed to an ip type, but the trie hasn't been pulled down yet
+    Synchronizing(SynchronizingState),
+    /// We've got a trie, and are continuously updating it from websocket events
+    Subscribed(SubscribedState),
+    /// We failed somehow
+    Error(Slash0Error),
 }
 
-// TODO: This will be configurable later, obviously;
-const IP_VERSION: IpVersion = IpVersion::V4;
-
-type Tree = RadixTree<ThinData, VecSlab<Node<ThinData>>>;
-
-#[derive(Debug, Default)]
-struct MetricsState {
-    pub total_updates: AtomicUsize,
-    pub reclaimed_nodes: AtomicUsize,
+impl ClientState {
+    pub fn is_err(&self) -> bool {
+        matches!(self, ClientState::Initializing(_))
+    }
 }
 
-pub fn garbo_main() {
-    let ws = WebSocket::open("/ws").unwrap();
+#[derive(Debug, Error)]
+pub enum Slash0Error {
+    #[error("Failed to initialize the canvas: {0:?}")]
+    CanvasInitializationError(JsValue),
+    #[error("Failed to open the websocket connection to slash0: {0:?}")]
+    WebsocketError(#[from] anyhow::Error),
+    #[error("Failed to download route table state: {msg}")]
+    SynchronizationError { msg: String, source: anyhow::Error },
+}
 
-    spawn_local(async move {
-        let (mut write, mut read) = ws.split();
+#[derive(Debug)]
+pub struct InitializingState {}
 
-        let tree = match download_tree(&mut write, &mut read, IP_VERSION).await {
-            Ok(tree) => Arc::new(Mutex::new(tree)),
-            Err(e) => {
+impl InitializingState {
+    pub async fn run(self) -> Result<ClientState, Slash0Error> {
+        let render_state = start(CANVAS_ELEMENT_ID)
+            .await
+            .map_err(Slash0Error::CanvasInitializationError)?;
+
+        Ok(ClientState::Connecting(ConnectingState { render_state }))
+    }
+}
+
+pub struct ConnectingState {
+    pub render_state: RenderState,
+}
+
+impl ConnectingState {
+    pub async fn run(self) -> Result<ClientState, Slash0Error> {
+        let ws = WebSocket::open("/ws").map_err(|e| Slash0Error::WebsocketError(e.into()))?;
+        let (tx, rx) = ws.split();
+
+        Ok(ClientState::Connected(ConnectedState {
+            render_state: self.render_state,
+            ip_version: IpVersion::V4,
+            tx,
+            rx,
+        }))
+    }
+}
+
+pub struct ConnectedState {
+    pub render_state: RenderState,
+    pub ip_version: IpVersion,
+    pub tx: Tx,
+    pub rx: Rx,
+}
+
+impl ConnectedState {
+    pub async fn run(mut self) -> Result<ClientState, Slash0Error> {
+        send(
+            &mut self.tx,
+            Slash0Message::SubscribeRequest {
+                ip_version: self.ip_version,
+            },
+        )
+        .await
+        .map_err(|e| Slash0Error::SynchronizationError {
+            msg: "Failed to send subscribe request".to_string(),
+            source: anyhow!(e),
+        })?;
+
+        Ok(ClientState::Synchronizing(SynchronizingState {
+            render_state: self.render_state,
+            ip_version: self.ip_version,
+            tx: self.tx,
+            rx: self.rx,
+        }))
+    }
+}
+
+pub struct SynchronizingState {
+    pub render_state: RenderState,
+    pub ip_version: IpVersion,
+    pub tx: Tx,
+    pub rx: Rx,
+}
+
+impl SynchronizingState {
+    pub async fn run(mut self) -> Result<ClientState, Slash0Error> {
+        loop {
+            match receive(&mut self.rx).await {
+                Ok(Some(m)) => match m {
+                    Slash0Message::TrieSnapshot { ip_version, tree } => {
+                        if ip_version != self.ip_version {
+                            warn!(
+                                "Received an {} trie when I expected an {} trie. Ignoring it",
+                                ip_version, self.ip_version
+                            );
+                            continue;
+                        }
+
+                        return Ok(ClientState::Subscribed(SubscribedState {
+                            render_state: self.render_state,
+                            ip_version,
+                            tx: self.tx,
+                            rx: self.rx,
+                            tree,
+                            updates_since_sweep: 0,
+                        }));
+                    }
+                    Slash0Message::SubscribeRequest { .. } => {}
+                    Slash0Message::ThinBgpUpdate(_) => {}
+                },
+                Ok(None) => {
+                    warn!("Connection closed while attempting to sync. Reconnecting...");
+                    return Ok(ClientState::Connecting(ConnectingState {
+                        render_state: self.render_state,
+                    }));
+                }
+                Err(e) => return Err(Slash0Error::WebsocketError(e)),
+            }
+        }
+    }
+}
+
+pub struct SubscribedState {
+    pub render_state: RenderState,
+    pub ip_version: IpVersion,
+    pub tx: Tx,
+    pub rx: Rx,
+    pub tree: Tree,
+    updates_since_sweep: usize,
+}
+
+impl SubscribedState {
+    pub async fn run(mut self, stats: &mut StatsState) -> Result<ClientState, Slash0Error> {
+        let msg = match receive(&mut self.rx).await {
+            Ok(Some(m)) => m,
+            Ok(None) => {
                 warn!(
-                    "Failed to load tree state. TODO: Do something sensible here: {}",
-                    e
+                    "Connection closed from the server side while attempting to receive the next tree update. Reconnecting..."
                 );
-                return;
+                return Ok(ClientState::Connecting(ConnectingState {
+                    render_state: self.render_state,
+                }));
+            }
+            Err(e) => {
+                warn!("Failed to receive update, reconnecting: {e:?}");
+                return Ok(ClientState::Connecting(ConnectingState {
+                    render_state: self.render_state,
+                }));
             }
         };
 
-        let tree_copy = Arc::clone(&tree);
-        let metrics_state = Arc::new(MetricsState::default());
-        let metrics_clone = Arc::clone(&metrics_state);
-        spawn_local(async move {
-            let tree = tree_copy;
-            loop {
-                display_metrics(&tree, &metrics_clone).expect("Somehow failed to update UI");
-                sleep(Duration::from_secs(1)).await;
+        let Slash0Message::ThinBgpUpdate(update) = msg else {
+            // Just some noise. Ignore it
+            return Ok(ClientState::Subscribed(self));
+        };
+
+        let thin_data = ThinData {
+            timestamp: update.timestamp,
+        };
+
+        let t = &mut self.tree;
+        stats.record_update();
+        match update.update_type {
+            UpdateType::ANNOUNCE => {
+                t.insert(update.prefix, update.timestamp, thin_data, &mut |_| {});
             }
-        });
-
-        info!("Radix trie initialized! Initiating continuous replication...");
-
-        let mut updates_since_sweep: usize = 0;
-        loop {
-            let Ok(Some(Slash0Message::ThinBgpUpdate(update))) = receive(&mut read).await else {
-                continue;
-            };
-
-            let thin_data = ThinData {
-                timestamp: update.timestamp,
-            };
-            let mut t = tree.lock().unwrap();
-            match update.update_type {
-                UpdateType::ANNOUNCE => {
-                    t.insert(update.prefix, update.timestamp, thin_data, &mut |_| {});
-                }
-                UpdateType::WITHDRAW => {
-                    t.withdraw(update.prefix, update.timestamp, &mut |_| {});
-                }
+            UpdateType::WITHDRAW => {
+                t.withdraw(update.prefix, update.timestamp, &mut |_| {});
             }
+        };
 
-            metrics_state.total_updates.fetch_add(1, Ordering::Relaxed);
-            updates_since_sweep += 1;
-            if updates_since_sweep > 100000 {
-                let mut delta = t.node_count() as usize;
-                t.sweep_tombstones(&mut |_| {});
-                delta -= t.node_count() as usize;
-                metrics_state
-                    .reclaimed_nodes
-                    .fetch_add(delta, Ordering::SeqCst);
-                updates_since_sweep = 0;
-            }
-            drop(t);
+        self.updates_since_sweep += 1;
+        if self.updates_since_sweep > 5000 {
+            let pre_sweep_node_count = t.node_count();
+            t.sweep_tombstones(&mut |_| {});
+            let post_sweep_node_count = t.node_count();
+            let swept_nodes = pre_sweep_node_count - post_sweep_node_count;
+            stats.record_swept_nodes(swept_nodes);
+            self.updates_since_sweep = 0;
         }
-    })
-}
 
-async fn download_tree(
-    tx: &mut SplitSink<WebSocket, Message>,
-    rx: &mut SplitStream<WebSocket>,
-    ip_version: IpVersion,
-) -> anyhow::Result<Tree> {
-    send(tx, Slash0Message::SubscribeRequest { ip_version }).await?;
-
-    loop {
-        match receive(rx).await {
-            Ok(Some(Slash0Message::TrieSnapshot {
-                ip_version: ipv,
-                tree,
-            })) => {
-                if ip_version != ipv {
-                    info!(
-                        "Got tree snapshot with ip_version: {:?} when expecting one of type: {:?}. Ignoring.",
-                        ipv, ip_version
-                    );
-                    continue;
-                }
-                return Ok(tree);
-            }
-            Ok(Some(msg)) => {
-                debug!(
-                    "Got unexpected message while waiting for tree snapshot. Ignoring: {:?}",
-                    msg
-                );
-            }
-            Ok(None) => {
-                debug!(
-                    "Connection was closed when attempting to synchronize with the server. Abandoning attempt"
-                );
-                bail!("Connectin closed!");
-            }
-            Err(err) => return Err(err.context("Failed to receive the trie message")),
-        }
+        Ok(ClientState::Subscribed(self))
     }
 }
 
@@ -211,17 +286,4 @@ async fn receive(rx: &mut SplitStream<WebSocket>) -> anyhow::Result<Option<Slash
         }
         Message::Bytes(bytes) => Ok(Some(postcard::from_bytes::<Slash0Message>(&bytes)?)),
     }
-}
-
-async fn sleep(duration: Duration) {
-    let _ = Promise::new(&mut |resolve, _| {
-        window()
-            .unwrap()
-            .set_timeout_with_callback_and_timeout_and_arguments_0(
-                &resolve,
-                duration.as_millis().min(i32::MAX as u128) as i32,
-            )
-            .unwrap();
-    })
-    .await;
 }

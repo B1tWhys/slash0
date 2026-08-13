@@ -1,7 +1,15 @@
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
+use wgpu::{Queue, RenderPipeline, TextureView};
 
-pub async fn _start(canvas_id: &str) -> Result<(), JsValue> {
+#[allow(dead_code)]
+pub struct RenderState {
+    pipeline: RenderPipeline,
+    queue: Queue,
+    view: TextureView,
+}
+
+pub async fn start(canvas_id: &str) -> Result<RenderState, JsValue> {
     let canvas = web_sys::window()
         .unwrap()
         .document()
@@ -135,5 +143,9 @@ pub async fn _start(canvas_id: &str) -> Result<(), JsValue> {
     }
     queue.submit(std::iter::once(encoder.finish()));
     queue.present(frame);
-    Ok(())
+    Ok(RenderState {
+        pipeline,
+        queue,
+        view,
+    })
 }

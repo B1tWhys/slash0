@@ -11,6 +11,8 @@
 //! This module also owns the address-family tag ([`IpVersion`]) and, behind the
 //! `parse` feature, CIDR-string parsing ([`Prefix::parse_cidr`]).
 
+use core::fmt::{Display, Formatter};
+
 /// Maximum prefix length in bits, sized for IPv6.
 ///
 /// IPv4 prefixes use lengths `0..=32`; IPv6 uses `0..=128`. Callers should
@@ -29,6 +31,15 @@ pub const MAX_PREFIX_LEN: u32 = 128;
 pub enum IpVersion {
     V4 = 4,
     V6 = 6,
+}
+
+impl Display for IpVersion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> core::fmt::Result {
+        match self {
+            IpVersion::V4 => f.write_str("IPv4"),
+            IpVersion::V6 => f.write_str("IPv6"),
+        }
+    }
 }
 
 /// A 128-bit IP address: a big-endian `[u32; 4]` key with the most significant
