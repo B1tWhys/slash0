@@ -19,6 +19,18 @@ pub fn vs_main(
     *out_uv = Vec2::new(x * 0.5 + 0.5, y * 0.5 + 0.5);
 }
 
+#[spirv(fragment)]
+pub fn fs_main(
+    _uv: Vec2,
+    out_color: &mut Vec4,
+    // #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] tree_slab: &[Node<ThinData>],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] tree_slab: &[u32],
+) {
+    // let red = tree_slab[0].prefix.len as f32 / 32f32;
+    let red = tree_slab[0] as f32 / 32f32;
+    *out_color = Vec4::new(red, 0.0, 0.0, 1.0);
+}
+
 /// Demonstration of the shared Hilbert code: map each pixel to a point in
 /// Hilbert space, invert the curve to the distance ("IP") at that point, and
 /// color by how far along the curve it sits. The result is a rainbow that
@@ -26,7 +38,7 @@ pub fn vs_main(
 /// the curve. No zoom: UV lands directly on the high bits of the 64-bit axes,
 /// so screen resolution sets the effective curve order.
 #[spirv(fragment)]
-pub fn fs_main(uv: Vec2, out_color: &mut Vec4) {
+pub fn fs_hilbert_poc(uv: Vec2, out_color: &mut Vec4) {
     // Pack a 24-bit UV coordinate into the top bits of each 64-bit axis. Word 0
     // is the most significant half, so the screen drives the coarsest Hilbert
     // subdivisions and the low bits stay zero.
@@ -61,4 +73,9 @@ fn absf(v: f32) -> f32 {
 fn clamp01(v: f32) -> f32 {
     let lower = if v < 0.0 { 0.0 } else { v };
     if lower > 1.0 { 1.0 } else { lower }
+}
+
+#[spirv(fragment)]
+pub fn fs_foo(_uv: Vec2, out_color: &mut Vec4) {
+    *out_color = Vec4::new(1.0, 0.0, 0.0, 1.0);
 }

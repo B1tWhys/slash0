@@ -1,4 +1,4 @@
-use crate::render::{RenderState, start};
+use crate::render::RenderState;
 use anyhow::{Context, anyhow, bail};
 use futures::stream::{SplitSink, SplitStream};
 use futures::{SinkExt, StreamExt};
@@ -52,7 +52,10 @@ async fn run() {
             stats.report(&state);
         }
         state = match state {
-            ClientState::Initializing(s) => s.run().await,
+            ClientState::Initializing(s) => {
+                let _ = s.run().await;
+                break;
+            }
             ClientState::Connecting(s) => s.run().await,
             ClientState::Connected(s) => s.run().await,
             ClientState::Synchronizing(s) => s.run().await,
@@ -100,7 +103,7 @@ pub struct InitializingState {}
 
 impl InitializingState {
     pub async fn run(self) -> Result<ClientState, Slash0Error> {
-        let render_state = start(CANVAS_ELEMENT_ID)
+        let render_state = RenderState::init(CANVAS_ELEMENT_ID, "fs_main")
             .await
             .map_err(Slash0Error::CanvasInitializationError)?;
 
