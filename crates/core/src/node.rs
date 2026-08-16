@@ -63,3 +63,26 @@ impl<D> Node<D> {
         self.children[0].is_some() as u32 + self.children[1].is_some() as u32
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Node, NodeFlags, NodeIdx};
+    use crate::prefix::Prefix;
+    use crate::thin::ThinData;
+    use core::mem::size_of;
+
+    #[test]
+    fn thin_node_has_no_padding() {
+        // The CPU uploads Node<ThinData> in its #[repr(C)] layout and the shader
+        // reads it back in std430. Those agree only while every field is a
+        // 4-byte-aligned u32/[u32; N] and the struct is densely packed. This
+        // survives adding more u32 fields (size just grows on both sides) but
+        // fires the moment a field introduces padding -- the signal to go
+        // re-check that the two layouts still line up.
+        let fields = size_of::<[Option<NodeIdx>; 2]>()
+            + size_of::<Prefix>()
+            + size_of::<NodeFlags>()
+            + size_of::<ThinData>();
+        assert_eq!(size_of::<Node<ThinData>>(), fields);
+    }
+}

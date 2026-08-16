@@ -1,4 +1,5 @@
 #[apply(Serde!)]
+#[apply(Pod!)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(C)]
 pub struct Timestamp(pub [u32; 2]);

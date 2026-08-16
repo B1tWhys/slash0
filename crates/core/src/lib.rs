@@ -15,6 +15,7 @@ pub mod slab;
 pub mod thin;
 pub mod timestamp;
 pub mod tree;
+pub mod uniforms;
 
 #[cfg(feature = "thick")]
 pub mod thick;

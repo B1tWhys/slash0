@@ -1,6 +1,9 @@
 #![no_std]
 
 use slash0_core::hilbert::{HilbertPoint, point_to_ip};
+use slash0_core::node::Node;
+use slash0_core::thin::ThinData;
+use slash0_core::uniforms::RenderUniforms;
 use spirv_std::glam::{Vec2, Vec4};
 use spirv_std::spirv;
 
@@ -23,12 +26,23 @@ pub fn vs_main(
 pub fn fs_main(
     _uv: Vec2,
     out_color: &mut Vec4,
-    // #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] tree_slab: &[Node<ThinData>],
-    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] tree_slab: &[u32],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] tree_slab: &[Node<ThinData>],
+    #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] uniforms: &RenderUniforms,
 ) {
-    // let red = tree_slab[0].prefix.len as f32 / 32f32;
-    let red = tree_slab[0] as f32 / 32f32;
-    *out_color = Vec4::new(red, 0.0, 0.0, 1.0);
+    // Placeholder body: prove the slab + uniform bindings resolve against real
+    // node data by coloring the whole frame from the root node's timestamp. The
+    // per-pixel Hilbert walk that picks a node per pixel comes in a later phase.
+    match uniforms.root {
+        Some(root_idx) => {
+            let root = &tree_slab[root_idx.get() as usize];
+            // WGSL has no u64, so approximate "age since last update" from the
+            // low millisecond word and fade red to black over ~1s.
+            let age_ms = uniforms.now.0[1].wrapping_sub(root.data.timestamp.0[1]);
+            let brightness = 1.0 - clamp01(age_ms as f32 / 1000.0);
+            *out_color = Vec4::new(brightness, 0.0, 0.0, 1.0);
+        }
+        None => *out_color = Vec4::new(0.0, 0.0, 0.0, 1.0),
+    }
 }
 
 /// Demonstration of the shared Hilbert code: map each pixel to a point in

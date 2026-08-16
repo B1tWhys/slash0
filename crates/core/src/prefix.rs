@@ -50,6 +50,7 @@ impl Display for IpVersion {
 /// `#[repr(transparent)]` so it shares `[u32; 4]`'s layout and can embed in
 /// shader-visible structs or be memcpy'd into GPU buffers.
 #[apply(Serde!)]
+#[apply(Pod!)]
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Address(pub [u32; 4]);
@@ -201,6 +202,7 @@ impl From<u32> for Address {
 ///
 /// Laid out as `#[repr(C)]` so it can embed in shader-visible structs.
 #[apply(Serde!)]
+#[apply(Pod!)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Prefix {
