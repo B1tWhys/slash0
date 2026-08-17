@@ -131,22 +131,33 @@ impl<D: NodeData, S: SlabRead<Node<D>>> RadixTree<D, S> {
     /// Unannounced structural nodes (path-compression splits and withdrawn
     /// nodes pending sweep) are traversed but never returned.
     pub fn lookup(&self, addr: Address) -> Option<NodeIdx> {
-        self.lookup_recursive(self.root?, addr)
+        self.lookup_prefix(Prefix::from_address(addr, MAX_PREFIX_LEN))
     }
 
-    fn lookup_recursive(&self, subroot: NodeIdx, addr: Address) -> Option<NodeIdx> {
-        let node = self.slab.get(subroot);
-        if !node.prefix.covers(addr) {
-            return None;
+    /// Similar to [lookup], except it stops once reaching the length of the provided prefix
+    pub fn lookup_prefix(&self, prefix: Prefix) -> Option<NodeIdx> {
+        let mut cur_idx = self.root?;
+        let mut ans = None;
+
+        loop {
+            let cur = self.slab.get(cur_idx);
+            if cur.prefix.common_prefix_len(&prefix) < cur.prefix.len {
+                break;
+            }
+            if cur.is_announced() {
+                ans = Some(cur_idx);
+            }
+            if cur.prefix.len == MAX_PREFIX_LEN {
+                break;
+            }
+            let bit = prefix.bit_at(cur.prefix.len) as usize;
+            match cur.children[bit] {
+                Some(next) => cur_idx = next,
+                None => break,
+            }
         }
-        // Prefer any deeper announced descendant over this level.
-        let deeper = if node.prefix.len < MAX_PREFIX_LEN {
-            let bit = addr.bit_at(node.prefix.len) as usize;
-            node.children[bit].and_then(|c| self.lookup_recursive(c, addr))
-        } else {
-            None
-        };
-        deeper.or_else(|| node.is_announced().then_some(subroot))
+
+        ans
     }
 }
 

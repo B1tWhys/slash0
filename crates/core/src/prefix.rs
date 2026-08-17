@@ -143,16 +143,18 @@ impl Address {
     /// assert_eq!(Address([0xFFFF_FFFF; 4]).masked(0), Address([0, 0, 0, 0]));
     /// assert_eq!(Address([0xFFFF_FFFF; 4]).masked(128), Address([0xFFFF_FFFF; 4]));
     /// ```
+    // The iter based loop doesn't compile for the GPU
+    #[allow(clippy::needless_range_loop)]
     pub fn masked(self, len: u32) -> Address {
         let mut words = self.0;
-        for (word_idx, word) in words.iter_mut().enumerate() {
+        for word_idx in 0..4 {
             let word_start = word_idx as u32 * 32;
             if len <= word_start {
-                *word = 0;
+                words[word_idx] = 0;
             } else if len < word_start + 32 {
                 let bits_to_keep = len - word_start;
                 let shift = 32 - bits_to_keep;
-                *word &= !0u32 << shift;
+                words[word_idx] &= !0u32 << shift;
             }
         }
         Address(words)

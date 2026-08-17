@@ -1,8 +1,14 @@
 #![no_std]
 
+pub mod slab;
+
+use crate::slab::GpuSlab;
 use slash0_core::hilbert::{HilbertPoint, point_to_ip};
 use slash0_core::node::Node;
+use slash0_core::prefix::Prefix;
+use slash0_core::slab::SlabRead;
 use slash0_core::thin::ThinData;
+use slash0_core::tree::RadixTree;
 use slash0_core::uniforms::RenderUniforms;
 use spirv_std::glam::{Vec2, Vec4};
 use spirv_std::spirv;
@@ -24,25 +30,35 @@ pub fn vs_main(
 
 #[spirv(fragment)]
 pub fn fs_main(
-    _uv: Vec2,
+    uv: Vec2,
     out_color: &mut Vec4,
     #[spirv(storage_buffer, descriptor_set = 0, binding = 0)] tree_slab: &[Node<ThinData>],
     #[spirv(storage_buffer, descriptor_set = 0, binding = 1)] uniforms: &RenderUniforms,
 ) {
-    // Placeholder body: prove the slab + uniform bindings resolve against real
-    // node data by coloring the whole frame from the root node's timestamp. The
-    // per-pixel Hilbert walk that picks a node per pixel comes in a later phase.
-    match uniforms.root {
-        Some(root_idx) => {
-            let root = &tree_slab[root_idx.get() as usize];
-            // WGSL has no u64, so approximate "age since last update" from the
-            // low millisecond word and fade red to black over ~5s.
-            let age_ms = uniforms.now.0[1].wrapping_sub(root.data.timestamp.0[1]);
-            let brightness = 1.0 - clamp01(age_ms as f32 / 5000.0);
-            *out_color = Vec4::new(brightness, 0.0, 0.0, 1.0);
-        }
-        None => *out_color = Vec4::new(0.0, 0.0, 0.0, 1.0),
-    }
+    // TODO: move/scale the window, at which point this needs to be reworked to use not just 24 bits
+    let scale = ((1u32 << 24) - 1) as f32;
+    let ax = ((uv.x * scale) as u32 & 0x00FF_FFFF) << 8;
+    let ay = ((uv.y * scale) as u32 & 0x00FF_FFFF) << 8;
+
+    let slab = GpuSlab::new(tree_slab);
+    let tree = RadixTree::with_root(slab, uniforms.root);
+
+    let addr = point_to_ip(HilbertPoint {
+        x: [ax, 0],
+        y: [ay, 0],
+    });
+
+    let Some(node_idx) = tree.lookup_prefix(Prefix::from_address(addr, 24)) else {
+        *out_color = Vec4::new(0.0, 0.0, 0.0, 1.0);
+        return;
+    };
+
+    let node = slab.get(node_idx);
+    // TODO: consider using proper 64 bit math for routes that haven't been announced in a couple weeks
+    let age = uniforms.now.0[1].wrapping_sub(node.data.timestamp.0[1]);
+    let fadeout_duration_ms = 120.0 * 1000.0;
+    let brightness = 1.0 - clamp01(age as f32 / fadeout_duration_ms);
+    *out_color = Vec4::new(brightness, 0.0, 0.0, 1.0);
 }
 
 /// Demonstration of the shared Hilbert code: map each pixel to a point in
