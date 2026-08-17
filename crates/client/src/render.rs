@@ -58,6 +58,14 @@ impl RenderState {
         })
     }
 
+    /// Upload the entire slab to the GPU in a single write. Index-aligned: slab
+    /// slot `i` lands at byte `i * NODE_SIZE`, matching how the shader indexes
+    /// it. Used to seed the buffer from a freshly downloaded snapshot.
+    pub fn upload_slab(&mut self, slab: &VecSlab<Node<ThinData>>) {
+        self.queue
+            .write_buffer(&self.slab_buffer, 0, bytemuck::cast_slice(slab.as_slice()));
+    }
+
     /// Flush the given touched slab nodes to the GPU buffer. The writes are
     /// staged by wgpu and applied at the next `render` submit.
     pub fn update(&mut self, slab: &VecSlab<Node<ThinData>>, dirty: &[NodeIdx]) {

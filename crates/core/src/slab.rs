@@ -81,6 +81,14 @@ mod vec_backed {
                 max_capacity: other.max_capacity,
             }
         }
+
+        /// The backing entries as one contiguous slice, index-aligned: element
+        /// `i` is the entry at [`NodeIdx`] `i`. Includes the reserved slot 0 and
+        /// any freed holes, so a consumer can copy the whole thing (e.g. a GPU
+        /// bulk upload) without translating indices.
+        pub fn as_slice(&self) -> &[T] {
+            &self.entries
+        }
     }
 
     impl<T: Default> Default for VecSlab<T> {

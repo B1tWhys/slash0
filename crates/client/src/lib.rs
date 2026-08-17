@@ -1,7 +1,9 @@
 use crate::render::RenderState;
+use crate::time::now_timestamp;
 use anyhow::{Context, anyhow, bail};
+use futures::channel::oneshot;
 use futures::stream::{SplitSink, SplitStream};
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt, select};
 use gloo_net::websocket::Message;
 use gloo_net::websocket::futures::WebSocket;
 use log::warn;
@@ -11,15 +13,13 @@ use slash0_core::slab::VecSlab;
 use slash0_core::thin::ThinData;
 use slash0_core::tree::RadixTree;
 use slash0_core::wire::{Slash0Message, UpdateType};
+use std::pin::pin;
 use thiserror::Error;
 use wasm_bindgen::JsValue;
+use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::spawn_local;
 
-use crate::stats_for_nerds::StatsState;
-use wasm_bindgen::prelude::*;
-
 mod render;
-mod stats_for_nerds;
 pub mod time;
 
 const CANVAS_ELEMENT_ID: &str = "slash0";
@@ -46,20 +46,13 @@ pub fn main() {
 async fn run() {
     let mut state = ClientState::Initializing(InitializingState {});
 
-    let mut stats = StatsState::default();
     loop {
-        if stats.is_time_for_report() {
-            stats.report(&state);
-        }
         state = match state {
-            ClientState::Initializing(s) => {
-                let _ = s.run().await;
-                break;
-            }
+            ClientState::Initializing(s) => s.run().await,
             ClientState::Connecting(s) => s.run().await,
             ClientState::Connected(s) => s.run().await,
             ClientState::Synchronizing(s) => s.run().await,
-            ClientState::Subscribed(s) => s.run(&mut stats).await,
+            ClientState::Subscribed(s) => s.run().await,
             ClientState::Error(_) => break,
         }
         .unwrap_or_else(ClientState::Error)
@@ -80,12 +73,6 @@ pub enum ClientState {
     Subscribed(SubscribedState),
     /// We failed somehow
     Error(Slash0Error),
-}
-
-impl ClientState {
-    pub fn is_err(&self) -> bool {
-        matches!(self, ClientState::Initializing(_))
-    }
 }
 
 #[derive(Debug, Error)]
@@ -180,6 +167,11 @@ impl SynchronizingState {
                             continue;
                         }
 
+                        // Seed the GPU slab buffer from the freshly downloaded
+                        // tree. The per-frame render loop in SubscribedState
+                        // takes over drawing from here.
+                        self.render_state.upload_slab(&tree.slab);
+
                         return Ok(ClientState::Subscribed(SubscribedState {
                             render_state: self.render_state,
                             ip_version,
@@ -214,56 +206,79 @@ pub struct SubscribedState {
 }
 
 impl SubscribedState {
-    pub async fn run(mut self, stats: &mut StatsState) -> Result<ClientState, Slash0Error> {
-        let msg = match receive(&mut self.rx).await {
-            Ok(Some(m)) => m,
-            Ok(None) => {
-                warn!(
-                    "Connection closed from the server side while attempting to receive the next tree update. Reconnecting..."
-                );
-                return Ok(ClientState::Connecting(ConnectingState {
-                    render_state: self.render_state,
-                }));
-            }
-            Err(e) => {
-                warn!("Failed to receive update, reconnecting: {e:?}");
-                return Ok(ClientState::Connecting(ConnectingState {
-                    render_state: self.render_state,
-                }));
-            }
-        };
+    /// Runs the steady-state loop: apply websocket updates to the tree as they
+    /// arrive, and draw one frame per browser animation frame. The two are
+    /// decoupled - draws happen on the display's cadence regardless of update
+    /// rate, and each frame samples the live clock so the shader's time-based
+    /// fade animates even when no updates are arriving.
+    pub async fn run(self) -> Result<ClientState, Slash0Error> {
+        let SubscribedState {
+            mut render_state,
+            mut rx,
+            mut tree,
+            mut updates_since_sweep,
+            tx: _tx,
+            ip_version: _,
+        } = self;
 
-        let Slash0Message::ThinBgpUpdate(update) = msg else {
-            // Just some noise. Ignore it
-            return Ok(ClientState::Subscribed(self));
-        };
+        // Hold the animation-frame future across iterations and re-arm it only
+        // after it fires. AnimationFrameGuard already makes recreating it each
+        // iteration safe -- dropping a still-pending frame cancels its callback --
+        // but that would churn a boxed allocation plus a request/cancel
+        // animation-frame pair on every websocket message. Persisting it
+        // registers one callback and lets it run.
+        let mut frame = next_animation_frame().boxed_local().fuse();
 
-        let thin_data = ThinData {
-            timestamp: update.timestamp,
-        };
+        loop {
+            let mut recv = pin!(receive(&mut rx).fuse());
 
-        let t = &mut self.tree;
-        stats.record_update();
-        match update.update_type {
-            UpdateType::ANNOUNCE => {
-                t.insert(update.prefix, update.timestamp, thin_data, &mut |_| {});
+            select! {
+                message = recv => match message {
+                    Ok(Some(Slash0Message::ThinBgpUpdate(update))) => {
+                        let mut dirty = Vec::new();
+                        let thin_data = ThinData {
+                            timestamp: update.timestamp,
+                        };
+                        match update.update_type {
+                            UpdateType::ANNOUNCE => {
+                                tree.insert(update.prefix, update.timestamp, thin_data, &mut |idx| {
+                                    dirty.push(idx)
+                                });
+                            }
+                            UpdateType::WITHDRAW => {
+                                tree.withdraw(update.prefix, update.timestamp, &mut |idx| {
+                                    dirty.push(idx)
+                                });
+                            }
+                        }
+
+                        updates_since_sweep += 1;
+                        if updates_since_sweep > 5000 {
+                            tree.sweep_tombstones(&mut |idx| dirty.push(idx));
+                            updates_since_sweep = 0;
+                        }
+
+                        render_state.update(&tree.slab, &dirty);
+                    }
+                    // Anything else on the wire is noise at this point.
+                    Ok(Some(_)) => {}
+                    Ok(None) => {
+                        warn!("Connection closed by the server. Reconnecting...");
+                        return Ok(ClientState::Connecting(ConnectingState { render_state }));
+                    }
+                    Err(e) => {
+                        warn!("Failed to receive update, reconnecting: {e:?}");
+                        return Ok(ClientState::Connecting(ConnectingState { render_state }));
+                    }
+                },
+                _ = frame => {
+                    if let Err(e) = render_state.render(tree.root(), now_timestamp()) {
+                        warn!("Frame draw failed: {e:?}");
+                    }
+                    frame = next_animation_frame().boxed_local().fuse();
+                }
             }
-            UpdateType::WITHDRAW => {
-                t.withdraw(update.prefix, update.timestamp, &mut |_| {});
-            }
-        };
-
-        self.updates_since_sweep += 1;
-        if self.updates_since_sweep > 5000 {
-            let pre_sweep_node_count = t.node_count();
-            t.sweep_tombstones(&mut |_| {});
-            let post_sweep_node_count = t.node_count();
-            let swept_nodes = pre_sweep_node_count - post_sweep_node_count;
-            stats.record_swept_nodes(swept_nodes);
-            self.updates_since_sweep = 0;
         }
-
-        Ok(ClientState::Subscribed(self))
     }
 }
 
@@ -289,4 +304,34 @@ async fn receive(rx: &mut SplitStream<WebSocket>) -> anyhow::Result<Option<Slash
         }
         Message::Bytes(bytes) => Ok(Some(postcard::from_bytes::<Slash0Message>(&bytes)?)),
     }
+}
+
+/// Cancels a pending `requestAnimationFrame` when dropped, so a callback that
+/// fires after its future is dropped never runs into a freed closure.
+struct AnimationFrameGuard {
+    window: web_sys::Window,
+    handle: i32,
+}
+
+impl Drop for AnimationFrameGuard {
+    fn drop(&mut self) {
+        let _ = self.window.cancel_animation_frame(self.handle);
+    }
+}
+
+/// Resolves on the next browser animation frame.
+async fn next_animation_frame() {
+    let (sender, receiver) = oneshot::channel::<()>();
+    let closure = ScopedClosure::once(move |_timestamp: f64| {
+        let _ = sender.send(());
+    });
+    let window = web_sys::window().expect("no window");
+    let handle = window
+        .request_animation_frame(closure.as_ref().unchecked_ref())
+        .expect("request_animation_frame failed");
+    // Declared after `closure` so it drops first: on early drop the guard
+    // cancels the callback before `closure` is freed. `closure` itself stays
+    // alive until the callback fires (unblocking the await below).
+    let _guard = AnimationFrameGuard { window, handle };
+    let _ = receiver.await;
 }

@@ -36,9 +36,9 @@ pub fn fs_main(
         Some(root_idx) => {
             let root = &tree_slab[root_idx.get() as usize];
             // WGSL has no u64, so approximate "age since last update" from the
-            // low millisecond word and fade red to black over ~1s.
+            // low millisecond word and fade red to black over ~5s.
             let age_ms = uniforms.now.0[1].wrapping_sub(root.data.timestamp.0[1]);
-            let brightness = 1.0 - clamp01(age_ms as f32 / 1000.0);
+            let brightness = 1.0 - clamp01(age_ms as f32 / 5000.0);
             *out_color = Vec4::new(brightness, 0.0, 0.0, 1.0);
         }
         None => *out_color = Vec4::new(0.0, 0.0, 0.0, 1.0),
@@ -87,9 +87,4 @@ fn absf(v: f32) -> f32 {
 fn clamp01(v: f32) -> f32 {
     let lower = if v < 0.0 { 0.0 } else { v };
     if lower > 1.0 { 1.0 } else { lower }
-}
-
-#[spirv(fragment)]
-pub fn fs_foo(_uv: Vec2, out_color: &mut Vec4) {
-    *out_color = Vec4::new(1.0, 0.0, 0.0, 1.0);
 }
