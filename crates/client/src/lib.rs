@@ -258,7 +258,7 @@ impl SubscribedState {
                             updates_since_sweep = 0;
                         }
 
-                        render_state.update(&tree.slab, &dirty);
+                        render_state.update(&dirty);
                     }
                     // Anything else on the wire is noise at this point.
                     Ok(Some(_)) => {}
@@ -272,7 +272,7 @@ impl SubscribedState {
                     }
                 },
                 _ = frame => {
-                    if let Err(e) = render_state.render(tree.root(), now_timestamp()) {
+                    if let Err(e) = render_state.render(tree.root(), now_timestamp(), &tree.slab) {
                         warn!("Frame draw failed: {e:?}");
                     }
                     frame = next_animation_frame().boxed_local().fuse();

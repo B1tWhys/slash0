@@ -9,6 +9,7 @@ crate-type = ["cdylib"]
 [dependencies]
 slash0-core = { path = "../core", features = ["alloc", "serde", "gpu"] }
 bytemuck = { version = "1", default-features = false }
+hashbrown = "0.17.1"
 wgpu = { version = "30.0.0", default-features = false, features = ["webgpu", "wgsl"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"

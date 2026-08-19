@@ -1,3 +1,4 @@
+use hashbrown::HashSet;
 use slash0_core::node::{Node, NodeIdx};
 use slash0_core::slab::{SlabRead, VecSlab};
 use slash0_core::thin::ThinData;
@@ -22,6 +23,7 @@ pub struct RenderState {
     bind_group: BindGroup,
     slab_buffer: Buffer,
     uniform_buffer: Buffer,
+    dirty_node_queue: HashSet<NodeIdx>,
 }
 
 impl RenderState {
@@ -55,6 +57,7 @@ impl RenderState {
             bind_group,
             slab_buffer,
             uniform_buffer,
+            dirty_node_queue: HashSet::new(),
         })
     }
 
@@ -66,18 +69,30 @@ impl RenderState {
             .write_buffer(&self.slab_buffer, 0, bytemuck::cast_slice(slab.as_slice()));
     }
 
-    /// Flush the given touched slab nodes to the GPU buffer. The writes are
-    /// staged by wgpu and applied at the next `render` submit.
-    pub fn update(&mut self, slab: &VecSlab<Node<ThinData>>, dirty: &[NodeIdx]) {
-        for &idx in dirty {
+    /// Queue the given touched slab nodes to be sent to the GPU for the next render. Queued indexes
+    /// are de-duped to avoid undue GC pressure in the browser from spamming javascript calls
+    pub fn update(&mut self, dirty: &[NodeIdx]) {
+        self.dirty_node_queue.extend(dirty);
+    }
+
+    fn flush_dirties(&mut self, slab: &VecSlab<Node<ThinData>>) {
+        for &idx in self.dirty_node_queue.iter() {
             let offset = idx.get() as u64 * NODE_SIZE;
             self.queue
                 .write_buffer(&self.slab_buffer, offset, bytemuck::bytes_of(slab.get(idx)));
         }
+        self.dirty_node_queue.clear();
     }
 
     /// Draw one frame from the current slab contents.
-    pub fn render(&mut self, root: Option<NodeIdx>, now: Timestamp) -> Result<(), JsValue> {
+    pub fn render(
+        &mut self,
+        root: Option<NodeIdx>,
+        now: Timestamp,
+        slab: &VecSlab<Node<ThinData>>,
+    ) -> Result<(), JsValue> {
+        self.flush_dirties(slab);
+
         let uniforms = RenderUniforms { root, now };
         self.queue
             .write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));

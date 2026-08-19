@@ -5,12 +5,14 @@ pub mod slab;
 use crate::slab::GpuSlab;
 use slash0_core::hilbert::{HilbertPoint, point_to_ip};
 use slash0_core::node::Node;
-use slash0_core::prefix::Prefix;
 use slash0_core::slab::SlabRead;
 use slash0_core::thin::ThinData;
+use slash0_core::timestamp::Timestamp;
 use slash0_core::tree::RadixTree;
 use slash0_core::uniforms::RenderUniforms;
 use spirv_std::glam::{Vec2, Vec4};
+#[allow(unused)]
+use spirv_std::num_traits::Float;
 use spirv_std::spirv;
 
 /// Full-screen triangle: (-1,-1), (3,-1), (-1,3). Clipping to [-1,1]^2 covers
@@ -48,17 +50,29 @@ pub fn fs_main(
         y: [ay, 0],
     });
 
-    let Some(node_idx) = tree.lookup_prefix(Prefix::from_address(addr, 24)) else {
+    let Some(node_idx) = tree.lookup(addr) else {
         *out_color = Vec4::new(0.0, 0.0, 0.0, 1.0);
         return;
     };
 
     let node = slab.get(node_idx);
+    *out_color = calc_color(&uniforms.now, &node.data.timestamp);
+}
+
+const SPECTRUM_HALF_LIFE: f32 = 5.0;
+
+fn calc_color(now: &Timestamp, node_ts: &Timestamp) -> Vec4 {
     // TODO: consider using proper 64 bit math for routes that haven't been announced in a couple weeks
-    let age = uniforms.now.0[1].wrapping_sub(node.data.timestamp.0[1]);
-    let fadeout_duration_ms = 120.0 * 1000.0;
-    let brightness = 1.0 - clamp01(age as f32 / fadeout_duration_ms);
-    *out_color = Vec4::new(brightness, 0.0, 0.0, 1.0);
+    let now = now.0[1];
+    let node_ts = node_ts.0[1];
+    let diff_sec: f32 = if now >= node_ts {
+        (now - node_ts) as f32 / 1000.0
+    } else {
+        0.0
+    };
+    let hue = (-diff_sec / SPECTRUM_HALF_LIFE).exp2();
+
+    hue_2_rgba(hue)
 }
 
 /// Demonstration of the shared Hilbert code: map each pixel to a point in
@@ -94,6 +108,13 @@ pub fn fs_hilbert_poc(uv: Vec2, out_color: &mut Vec4) {
     let g = clamp01(2.0 - absf(h * 6.0 - 2.0));
     let b = clamp01(2.0 - absf(h * 6.0 - 4.0));
     *out_color = Vec4::new(r, g, b, 1.0);
+}
+
+fn hue_2_rgba(h: f32) -> Vec4 {
+    let r = clamp01(absf(h * 6.0 - 3.0) - 1.0);
+    let g = clamp01(2.0 - absf(h * 6.0 - 2.0));
+    let b = clamp01(2.0 - absf(h * 6.0 - 4.0));
+    Vec4::new(r, g, b, 1.0)
 }
 
 fn absf(v: f32) -> f32 {

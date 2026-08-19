@@ -1486,6 +1486,7 @@ dependencies = [
  "console_log",
  "futures",
  "gloo-net",
+ "hashbrown 0.17.1",
  "log",
  "naga 30.0.0",
  "postcard",
