@@ -1,13 +1,16 @@
-use futures::{StreamExt, TryStreamExt};
+use anyhow::Context;
+use futures::{SinkExt, StreamExt};
 use metrics::Unit::Seconds;
 use metrics::{Counter, Histogram, histogram};
 use std::time::SystemTime;
 use tokio::sync::broadcast;
-use tokio_util::codec::{FramedRead, LinesCodec};
-use tokio_util::io::StreamReader;
+use tokio_tungstenite::connect_async;
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
-use crate::messages::{RisMessage, RisMessageBody, ServerMessage, SubscriptionFilters};
+use crate::messages::{
+    ClientMessage, RisMessage, RisMessageBody, RisSubscribe, ServerMessage, SubscriptionFilters,
+};
 
 /// Encapsulating the metrics handles in this struct lets us amortize the cost of registering
 /// the metrics
@@ -40,11 +43,11 @@ impl MessageMetrics {
 
     /// Counts every relayed message, plus the announced and withdrawn prefixes
     /// carried by UPDATE
-    fn record(&self, message: &RisMessage) {
+    async fn record(&mut self, message: &RisMessage) {
         let now_ts = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap()
-            .as_secs_f32();
+            .as_secs_f64();
         let msg_age = now_ts - message.timestamp;
         self.message_age_on_receipt.record(msg_age);
 
@@ -65,8 +68,8 @@ impl MessageMetrics {
     }
 }
 
-/// RIS Live newline-delimited JSON streaming endpoint.
-const RIS_LIVE_STREAM_URL: &str = "https://ris-live.ripe.net/v1/stream/?format=json";
+/// RIS Live websocket endpoint
+const RIS_LIVE_STREAM_URL: &str = "wss://ris-live.ripe.net/v1/ws/";
 
 /// Ring-buffer capacity the broadcast channel retains for lagging receivers.
 /// A receiver that falls this far behind sees `RecvError::Lagged` and resumes at
@@ -88,34 +91,50 @@ pub async fn subscribe(
     let subscribe_header = serde_json::to_string(&filters)?;
     debug!(%subscribe_header, "subscribing to RIS Live");
 
-    let response = reqwest::Client::new()
-        .get(RIS_LIVE_STREAM_URL)
-        .header("X-RIS-Subscribe", subscribe_header)
-        .send()
-        .await?
-        .error_for_status()?;
+    let (ws_stream, _) = connect_async(RIS_LIVE_STREAM_URL).await?;
+    info!("RIS websocket handshake successful");
 
-    // RIS Live frames one `ServerMessage` per line; adapt the chunked byte
-    // stream into those records so partial-chunk reassembly isn't our problem.
-    let byte_stream = response.bytes_stream().map_err(std::io::Error::other);
-    let mut records = FramedRead::new(StreamReader::new(byte_stream), LinesCodec::new());
-    let metrics = MessageMetrics::new();
+    let (mut write, mut records) = ws_stream.split();
+    write
+        .send(Message::Text(
+            serde_json::to_string(&ClientMessage::RisSubscribe(RisSubscribe {
+                filters,
+                socket_options: None,
+            }))
+            .context("Failed to serialize RIS subscribe message")?
+            .into(),
+        ))
+        .await
+        .context("Failed to send RIS subscribe message")?;
+
+    let mut metrics = MessageMetrics::new();
 
     let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
     let ingest_tx = tx.clone();
     tokio::spawn(async move {
         while let Some(record) = records.next().await {
             let record = match record {
-                Ok(record) => record,
+                Ok(Message::Text(record)) => record,
+                Ok(Message::Close(close_frame)) => {
+                    warn!(?close_frame, "RIS-live closed the websocket connection");
+                    break;
+                }
                 Err(err) => {
                     warn!(%err, "RIS Live stream read error, closing");
                     break;
                 }
+                _ => {
+                    debug!(
+                        ?record,
+                        "Received unexpected record type from RIS-live, ignoring it"
+                    );
+                    continue;
+                }
             };
 
-            match serde_json::from_str::<ServerMessage>(&record) {
+            match serde_json::from_str::<ServerMessage>(record.as_ref()) {
                 Ok(ServerMessage::RisMessage(message)) => {
-                    metrics.record(&message);
+                    metrics.record(&message).await;
                     // A send error only means no receivers are currently
                     // attached; consumers may subscribe later, so keep ingesting.
                     let _ = ingest_tx.send(message);

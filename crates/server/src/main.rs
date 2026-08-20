@@ -83,7 +83,7 @@ fn setup_prometheus() -> anyhow::Result<PrometheusHandle> {
     let metrics_handle = PrometheusBuilder::new()
         .set_native_histogram_for_metric(
             Matcher::Full("slash0_ris_message_age_on_receipt".to_string()),
-            NativeHistogramConfig::new(1.1, 1000, 0.001).unwrap(),
+            NativeHistogramConfig::new(1.1, 200, 0.0009765625f64).unwrap(),
         )
         .install_recorder()
         .context("failed to install Prometheus recorder")?;

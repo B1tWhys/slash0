@@ -36,11 +36,11 @@ pub async fn subscribe_from_file(
     let (tx, rx) = broadcast::channel::<RisMessage>(1000);
     let ingest_tx = tx.clone();
     tokio::spawn(async move {
-        let mut last_timestamp_sec: Option<f32> = None;
+        let mut last_timestamp_sec: Option<f64> = None;
         tokio::pin!(messages);
         while let Some(message) = messages.next().await {
             if let Some(last_ts) = last_timestamp_sec {
-                let delay = Duration::from_secs_f32((message.timestamp - last_ts).max(0.0));
+                let delay = Duration::from_secs_f64((message.timestamp - last_ts).max(0.0));
                 if simulate_time {
                     tokio::time::sleep(delay).await;
                 }

@@ -19,7 +19,6 @@ type IpAddr = String;
 /// Messages the client sends to the server.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "type", content = "data", rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum ClientMessage {
     RisSubscribe(RisSubscribe),
     RisUnsubscribe(SubscriptionFilters),
@@ -152,7 +151,7 @@ pub struct RisSubscribeOk {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RisMessage {
     /// Time the message was received by the RRC (UNIX seconds, fractional).
-    pub timestamp: f32,
+    pub timestamp: f64,
     /// IP address of the BGP peer that sent this message.
     pub peer: IpAddr,
     /// Autonomous system of the peer (kept as a string, as in the protocol).
