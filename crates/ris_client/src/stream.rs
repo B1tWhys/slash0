@@ -1,10 +1,69 @@
 use futures::{StreamExt, TryStreamExt};
+use metrics::Unit::Seconds;
+use metrics::{Counter, Histogram, histogram};
+use std::time::SystemTime;
 use tokio::sync::broadcast;
 use tokio_util::codec::{FramedRead, LinesCodec};
 use tokio_util::io::StreamReader;
 use tracing::{debug, info, warn};
 
 use crate::messages::{RisMessage, RisMessageBody, ServerMessage, SubscriptionFilters};
+
+/// Encapsulating the metrics handles in this struct lets us amortize the cost of registering
+/// the metrics
+struct MessageMetrics {
+    /// 1 json blob received from RIS counts as one message
+    messages_total: Counter,
+    /// Each RIS message can contain multiple updates, each containing multiple prefixes
+    prefixes_announced_total: Counter,
+    /// Each RIS message can contain multiple withdrawals
+    prefixes_withdrawn_total: Counter,
+    /// Histogram representing the age of the message(s) when they arrive at the slash0 server. The
+    /// age is based on the timestamp recorded by ris-live when the BGP update reaches the route
+    /// collector
+    message_age_on_receipt: Histogram,
+}
+
+impl MessageMetrics {
+    fn new() -> Self {
+        Self {
+            messages_total: metrics::counter!("slash0_ris_messages_total"),
+            prefixes_announced_total: metrics::counter!("slash0_ris_prefixes_announced_total"),
+            prefixes_withdrawn_total: metrics::counter!("slash0_ris_prefixes_withdrawn_total"),
+            message_age_on_receipt: histogram!(
+                description: "Age of messages when they arrive at slash0. Measured from when the \
+                update arrived at the ris-live collector",
+                unit: Seconds,
+                "slash0_ris_message_age_on_receipt"),
+        }
+    }
+
+    /// Counts every relayed message, plus the announced and withdrawn prefixes
+    /// carried by UPDATE
+    fn record(&self, message: &RisMessage) {
+        let now_ts = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f32();
+        let msg_age = now_ts - message.timestamp;
+        self.message_age_on_receipt.record(msg_age);
+
+        self.messages_total.increment(1);
+
+        if let RisMessageBody::Update(update) = &message.body {
+            let announced: usize = update
+                .announcements
+                .iter()
+                .flatten()
+                .map(|announcement| announcement.prefixes.len())
+                .sum();
+            let withdrawn = update.withdrawals.iter().flatten().count();
+
+            self.prefixes_announced_total.increment(announced as u64);
+            self.prefixes_withdrawn_total.increment(withdrawn as u64);
+        }
+    }
+}
 
 /// RIS Live newline-delimited JSON streaming endpoint.
 const RIS_LIVE_STREAM_URL: &str = "https://ris-live.ripe.net/v1/stream/?format=json";
@@ -40,6 +99,7 @@ pub async fn subscribe(
     // stream into those records so partial-chunk reassembly isn't our problem.
     let byte_stream = response.bytes_stream().map_err(std::io::Error::other);
     let mut records = FramedRead::new(StreamReader::new(byte_stream), LinesCodec::new());
+    let metrics = MessageMetrics::new();
 
     let (tx, rx) = broadcast::channel(CHANNEL_CAPACITY);
     let ingest_tx = tx.clone();
@@ -55,7 +115,7 @@ pub async fn subscribe(
 
             match serde_json::from_str::<ServerMessage>(&record) {
                 Ok(ServerMessage::RisMessage(message)) => {
-                    record_metrics(&message);
+                    metrics.record(&message);
                     // A send error only means no receivers are currently
                     // attached; consumers may subscribe later, so keep ingesting.
                     let _ = ingest_tx.send(message);
@@ -64,33 +124,11 @@ pub async fn subscribe(
                     warn!(message = %err.message, "RIS Live reported an error");
                 }
                 Ok(other) => debug!(?other, "ignoring non-message RIS Live envelope"),
-                Err(err) => warn!(%err, "skipping unparseable RIS Live record"),
+                Err(err) => warn!(%err, ?record, "skipping unparseable RIS Live record"),
             }
         }
         info!("RIS Live stream ended");
     });
 
     Ok(rx)
-}
-
-/// Counts every relayed message, plus the announced and withdrawn prefixes
-/// carried by UPDATEs. Counting prefixes rather than messages matches the trie
-/// granularity: each prefix is one update to apply. Rates are derived downstream
-/// (e.g. `rate()` in Prometheus). Zero-valued increments keep every series
-/// present from the first message.
-fn record_metrics(message: &RisMessage) {
-    metrics::counter!("slash0_ris_messages_total").increment(1);
-
-    if let RisMessageBody::Update(update) = &message.body {
-        let announced: usize = update
-            .announcements
-            .iter()
-            .flatten()
-            .map(|announcement| announcement.prefixes.len())
-            .sum();
-        let withdrawn = update.withdrawals.iter().flatten().count();
-
-        metrics::counter!("slash0_ris_announcements_total").increment(announced as u64);
-        metrics::counter!("slash0_ris_withdrawals_total").increment(withdrawn as u64);
-    }
 }

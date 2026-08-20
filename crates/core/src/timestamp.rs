@@ -7,7 +7,7 @@ pub struct Timestamp(pub [u32; 2]);
 impl Timestamp {
     pub const ZERO: Self = Self([0, 0]);
 
-    pub const fn from_sec(s: f64) -> Self {
+    pub const fn from_sec(s: f32) -> Self {
         Self::from_millis((s * 1000.0) as u64)
     }
 

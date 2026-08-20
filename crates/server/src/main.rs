@@ -16,7 +16,9 @@ use std::time::Duration;
 use anyhow::Context;
 use bgpkit_parser::BgpkitParser;
 use clap::Parser;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{
+    Matcher, NativeHistogramConfig, PrometheusBuilder, PrometheusHandle,
+};
 use tokio::signal;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -79,6 +81,10 @@ fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {
 /// leaks
 fn setup_prometheus() -> anyhow::Result<PrometheusHandle> {
     let metrics_handle = PrometheusBuilder::new()
+        .set_native_histogram_for_metric(
+            Matcher::Full("slash0_ris_message_age_on_receipt".to_string()),
+            NativeHistogramConfig::new(1.1, 1000, 0.001).unwrap(),
+        )
         .install_recorder()
         .context("failed to install Prometheus recorder")?;
     // install_recorder() does not spawn upkeep the way install() does, so drive

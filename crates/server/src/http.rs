@@ -6,7 +6,8 @@ use axum::Json;
 use axum::Router;
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State};
-use axum::response::Response;
+use axum::http::{HeaderMap, header};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Serialize;
@@ -32,7 +33,9 @@ pub fn router(
         .with_state(route_table)
         .route(
             "/metrics",
-            get(move || async move { metrics_handle.render() }),
+            get(async move |header_map: HeaderMap| {
+                handle_metrics(metrics_handle, header_map).await
+            }),
         )
         .nest("/api", api_router())
         .fallback_service(ServeDir::new(&config.server.assets_dir))
@@ -70,4 +73,33 @@ async fn handle_socket(socket: WebSocket, route_table: Arc<RouteTable>, client_a
     let socket = WebSocketAdapter::new(socket);
     let conn = Connection::new();
     conn.run(socket, route_table, client_addr).await
+}
+
+const PROTOBUF_CONTENT_TYPE: &str =
+    "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; encoding=delimited";
+
+async fn handle_metrics(
+    metrics_handle: PrometheusHandle,
+    header_map: HeaderMap,
+) -> impl IntoResponse {
+    let accept = header_map
+        .get(header::ACCEPT)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("");
+
+    for mime_type in mime::MimeIter::new(accept).flatten() {
+        if mime_type.type_() == mime::APPLICATION
+            && (mime_type.subtype() == "vnd.google.protobuf" || mime_type.subtype() == "x-protobuf")
+        {
+            return (
+                [(header::CONTENT_TYPE, PROTOBUF_CONTENT_TYPE)],
+                metrics_handle.render_protobuf(),
+            );
+        }
+    }
+
+    (
+        [(header::CONTENT_TYPE, mime::TEXT_PLAIN.essence_str())],
+        metrics_handle.render().into_bytes(),
+    )
 }

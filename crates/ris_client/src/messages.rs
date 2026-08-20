@@ -152,7 +152,7 @@ pub struct RisSubscribeOk {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct RisMessage {
     /// Time the message was received by the RRC (UNIX seconds, fractional).
-    pub timestamp: f64,
+    pub timestamp: f32,
     /// IP address of the BGP peer that sent this message.
     pub peer: IpAddr,
     /// Autonomous system of the peer (kept as a string, as in the protocol).

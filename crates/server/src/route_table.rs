@@ -71,7 +71,7 @@ impl RouteTable {
         let mut v6_routes = HashMap::new();
         info!("Begin collecting routes from bgpkit_parser");
         for route in bgpkit_parser.add_filters(&[Filter::Type(ElemType::ANNOUNCE)]) {
-            let ts = Timestamp::from_sec(route.timestamp);
+            let ts = Timestamp::from_sec(route.timestamp as f32);
             match route.prefix.prefix {
                 IpNet::V4(net) => {
                     let prefix =
@@ -280,7 +280,7 @@ mod tests {
     use slash0_core::slab::SlabRead;
     use std::path::PathBuf;
 
-    fn message(timestamp: f64, body: RisMessageBody) -> RisMessage {
+    fn message(timestamp: f32, body: RisMessageBody) -> RisMessage {
         RisMessage {
             timestamp,
             peer: "192.0.2.1".to_owned(),
