@@ -101,6 +101,7 @@ impl RouteTable {
         .in_scope(|| {
             self.bulk_insert_routes(IpVersion::V4, v4_routes);
             self.bulk_insert_routes(IpVersion::V6, v6_routes);
+            self.sweep();
         });
     }
 
