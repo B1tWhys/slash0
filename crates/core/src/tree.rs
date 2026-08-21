@@ -131,11 +131,7 @@ impl<D: NodeData, S: SlabRead<Node<D>>> RadixTree<D, S> {
     /// Unannounced structural nodes (path-compression splits and withdrawn
     /// nodes pending sweep) are traversed but never returned.
     pub fn lookup(&self, addr: Address) -> Option<NodeIdx> {
-        self.lookup_prefix(Prefix::from_address(addr, MAX_PREFIX_LEN))
-    }
-
-    /// Similar to [lookup], except it stops once reaching the length of the provided prefix
-    pub fn lookup_prefix(&self, prefix: Prefix) -> Option<NodeIdx> {
+        let prefix = Prefix::from_address(addr, MAX_PREFIX_LEN);
         let mut cur_idx = self.root?;
         let mut ans = None;
 
@@ -145,6 +141,39 @@ impl<D: NodeData, S: SlabRead<Node<D>>> RadixTree<D, S> {
                 break;
             }
             if cur.is_announced() {
+                ans = Some(cur_idx);
+            }
+            if cur.prefix.len == MAX_PREFIX_LEN {
+                break;
+            }
+            let bit = prefix.bit_at(cur.prefix.len) as usize;
+            match cur.children[bit] {
+                Some(next) => cur_idx = next,
+                None => break,
+            }
+        }
+
+        ans
+    }
+
+    /// This looks up the longest prefix matching the address. If the longest matching prefix is
+    /// not advertised (it's just a structural node for the radix tree) but it's at least
+    /// `count_all_below` bits long, then it's returned. Otherwise, non-advertised nodes are ignored
+    ///
+    /// This is intended to make more of the trie visible when zoomed out
+    ///
+    /// TODO: Test coverage
+    pub fn limited_lookup(&self, addr: Address, count_all_below: u32) -> Option<NodeIdx> {
+        let prefix = Prefix::from_address(addr, MAX_PREFIX_LEN);
+        let mut cur_idx = self.root?;
+        let mut ans = None;
+
+        loop {
+            let cur = self.slab.get(cur_idx);
+            if cur.prefix.common_prefix_len(&prefix) < cur.prefix.len {
+                break;
+            }
+            if cur.is_announced() || cur.prefix.len >= count_all_below {
                 ans = Some(cur_idx);
             }
             if cur.prefix.len == MAX_PREFIX_LEN {
