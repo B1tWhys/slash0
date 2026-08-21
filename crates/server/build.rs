@@ -34,10 +34,7 @@ fn main() {
 
     let client_dir = workspace_root.join("crates/client");
     let mut trunk = Command::new("trunk");
-    trunk.arg("build").current_dir(&client_dir);
-    if std::env::var("PROFILE").as_deref() == Ok("release") {
-        trunk.arg("--release");
-    }
+    trunk.arg("build").arg("--release").current_dir(&client_dir);
 
     let status = trunk.status().unwrap_or_else(|err| {
         panic!(
