@@ -59,7 +59,7 @@ pub fn fs_main(
     *out_color = calc_color(&uniforms.now, &node.data.timestamp);
 }
 
-const SPECTRUM_HALF_LIFE: f32 = 5.0;
+const FADE_DURATION_SEC: f32 = 5.0;
 
 fn calc_color(now: &Timestamp, node_ts: &Timestamp) -> Vec4 {
     // TODO: consider using proper 64 bit math for routes that haven't been announced in a couple weeks
@@ -70,9 +70,10 @@ fn calc_color(now: &Timestamp, node_ts: &Timestamp) -> Vec4 {
     } else {
         0.0
     };
-    let hue = (-diff_sec / SPECTRUM_HALF_LIFE).exp2();
-
-    hue_2_rgba(hue)
+    // // Fresh announcements are blue and fade linearly to red over FADE_DURATION_SEC,
+    // // then stay red.
+    let t = 1.0 - clamp01(diff_sec / FADE_DURATION_SEC);
+    Vec4::new(t, t, t, 1.0)
 }
 
 /// Demonstration of the shared Hilbert code: map each pixel to a point in
@@ -108,13 +109,6 @@ pub fn fs_hilbert_poc(uv: Vec2, out_color: &mut Vec4) {
     let g = clamp01(2.0 - absf(h * 6.0 - 2.0));
     let b = clamp01(2.0 - absf(h * 6.0 - 4.0));
     *out_color = Vec4::new(r, g, b, 1.0);
-}
-
-fn hue_2_rgba(h: f32) -> Vec4 {
-    let r = clamp01(absf(h * 6.0 - 3.0) - 1.0);
-    let g = clamp01(2.0 - absf(h * 6.0 - 2.0));
-    let b = clamp01(2.0 - absf(h * 6.0 - 4.0));
-    Vec4::new(r, g, b, 1.0)
 }
 
 fn absf(v: f32) -> f32 {
