@@ -237,7 +237,8 @@ impl SubscribedState {
                     Ok(Some(Slash0Message::ThinBgpUpdate(update))) => {
                         let mut dirty = Vec::new();
                         let thin_data = ThinData {
-                            timestamp: update.timestamp,
+                            // timestamp: update.timestamp, // TODO: Decide if I wanna use the client or server ts
+                            timestamp: now_timestamp()
                         };
                         match update.update_type {
                             UpdateType::ANNOUNCE => {
