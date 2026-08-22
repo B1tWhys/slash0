@@ -12,6 +12,8 @@
 //! `parse` feature, CIDR-string parsing ([`Prefix::parse_cidr`]).
 
 use core::fmt::{Display, Formatter};
+#[cfg(feature = "parse")]
+use core::net::{AddrParseError, IpAddr};
 
 /// Maximum prefix length in bits, sized for IPv6.
 ///
@@ -193,6 +195,30 @@ impl From<u32> for Address {
     /// ```
     fn from(value: u32) -> Self {
         Self([value, 0, 0, 0])
+    }
+}
+
+#[cfg(feature = "parse")]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum AddressParseError<'a> {
+    #[error("Invalid ip address: {input}")]
+    InvalidIp {
+        input: &'a str,
+        source: AddrParseError,
+    },
+}
+
+#[cfg(feature = "parse")]
+impl Address {
+    pub fn parse(input: &str) -> Result<(Self, IpVersion), AddressParseError<'_>> {
+        let addr: IpAddr = input
+            .parse()
+            .map_err(|e| AddressParseError::InvalidIp { input, source: e })?;
+
+        match addr {
+            IpAddr::V4(v4) => Ok((v4.to_bits().into(), IpVersion::V4)),
+            IpAddr::V6(v6) => Ok((v6.to_bits().into(), IpVersion::V6)),
+        }
     }
 }
 
@@ -422,7 +448,9 @@ mod tests {
 
 #[cfg(all(test, feature = "parse"))]
 mod parse_tests {
-    use super::{CidrParseError, IpVersion, Prefix};
+    use super::{Address, CidrParseError, IpVersion, Prefix};
+    use alloc::format;
+    use alloc::string::ToString;
 
     fn parse(cidr: &str) -> (IpVersion, Prefix) {
         Prefix::parse_cidr(cidr).expect("expected a parseable prefix")
@@ -508,5 +536,61 @@ mod parse_tests {
             Prefix::parse_cidr("192.0.2.0/abc"),
             Err(CidrParseError::Length(_))
         ));
+    }
+
+    #[test]
+    fn test_parse_invalid_ips() {
+        let invalid = [
+            // Garbage
+            "Ceci n'est pas une IP",
+            // Too long
+            "127.0.0.1.0",
+            "2001:0db8:85a3:0000:0000:8a2e:0370:7334:1234",
+            // Too big value
+            "127.0.0.300",
+            // Invalid hex
+            "2001:0db8:85a3:0000:0000:8a2e:0370:733g",
+            // Too short
+            "",
+            ":",
+        ];
+
+        for case in invalid {
+            let err =
+                Address::parse(case).expect_err(&format!("Expected to get an err for {case}"));
+            assert!(
+                err.to_string().ends_with(case),
+                "The error for {case} didn't end with {case}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_valid_ips() {
+        let cases: [(&'static str, (Address, IpVersion)); _] = [
+            ("0.0.0.0", (0x00000000_u32.into(), IpVersion::V4)),
+            ("255.255.255.255", (0xFFFFFFFF_u32.into(), IpVersion::V4)),
+            ("::", (0x0_u128.into(), IpVersion::V6)),
+            ("FFFF::", ((0xFFFF_u128 << 112).into(), IpVersion::V6)),
+            (
+                "FFFF::FFFF",
+                (((0xFFFF_u128 << 112) + 0xFFFF).into(), IpVersion::V6),
+            ),
+            (
+                "FFFF::FFFF",
+                (((0xFFFF_u128 << 112) + 0xFFFF).into(), IpVersion::V6),
+            ),
+            (
+                "FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF:FFFF",
+                ((!0_u128).into(), IpVersion::V6),
+            ),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(
+                Address::parse(input).unwrap_or_else(|_| panic!("Failed to parse: {input}")),
+                expected
+            );
+        }
     }
 }
