@@ -1,0 +1,157 @@
+name: CI
+
+on:
+  push:
+    branches: [master, 'ci-test-*']
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Incremental artifacts are large, machine-specific and useless across runs;
+  # they only bloat the cache.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    name: build (aarch64-unknown-linux-gnu)
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      # prost-build shells out to protoc, and it is in the tree because
+      # metrics-exporter-prometheus needs its `protobuf` feature to expose the
+      # native histograms the server registers at startup.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      # No toolchain name here on purpose: rustup reads rust-toolchain.toml,
+      # which pins the nightly plus the rustc-dev/llvm-tools/rust-src components
+      # that rust-gpu needs to codegen SPIR-V.
+      - name: Install rust toolchain
+        run: rustup toolchain install
+
+      # Pinned to a commit rather than the mutable v2 tag: this is the only
+      # action here not vended by GitHub, and a tag can be repointed.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          # crates/client and crates/shader are excluded from the root
+          # workspace, so each has its own lockfile and target dir.
+          workspaces: |
+            .
+            crates/client
+            crates/shader
+          # Only master writes cache entries. A PR's cache is invisible to every
+          # other branch, so letting PRs save just evicts master's entries (and
+          # these target dirs are big enough to hit the 10GB repo cap fast).
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+
+      # trunk downloads wasm-bindgen and wasm-opt on first use.
+      - name: Cache trunk tool downloads
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/trunk
+          key: trunk-tools-${{ hashFiles('crates/client/Trunk.toml', 'crates/client/index.html') }}
+
+      # Fetched from trunk's own release rather than through a third-party
+      # action, and checksum-verified. Pinned because the checksum is
+      # version-specific; bump both together.
+      - name: Install trunk
+        env:
+          TRUNK_VERSION: v0.21.14
+          TRUNK_FILE: trunk-aarch64-unknown-linux-gnu.tar.gz
+        run: |
+          url="https://github.com/trunk-rs/trunk/releases/download/$TRUNK_VERSION"
+          curl -fsSL "$url/$TRUNK_FILE" -o "$TRUNK_FILE"
+          curl -fsSL "$url/$TRUNK_FILE.sha256" -o "$TRUNK_FILE.sha256"
+          echo "$(cat "$TRUNK_FILE.sha256")  $TRUNK_FILE" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "$TRUNK_FILE" -C "$HOME/.local/bin" trunk
+          rm "$TRUNK_FILE" "$TRUNK_FILE.sha256"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # The server's build script drives trunk, which builds the wasm client,
+      # which builds the shader to SPIR-V. One command covers all four crates.
+      - name: Build
+        run: cargo build --workspace --release --locked
+
+      - name: Test
+        run: cargo test --workspace --release --locked
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: slash0-aarch64-unknown-linux-gnu
+          path: |
+            target/release/slash0-server
+            crates/client/dist
+          if-no-files-found: error
+
+  publish:
+    name: publish image
+    needs: build
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/ci-test-')
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      packages: write
+    env:
+      # ghcr.io paths must be lowercase, so this is not the repo owner verbatim.
+      IMAGE: ghcr.io/b1twhys/slash0
+    steps:
+      - uses: actions/checkout@v7
+
+      # Restores target/release/ and crates/client/dist relative to the
+      # workspace, which is where the Dockerfile's COPY paths expect them.
+      - uses: actions/download-artifact@v8
+        with:
+          name: slash0-aarch64-unknown-linux-gnu
+
+      # Artifact zips do not carry the executable bit, and losing it surfaces as
+      # a permission-denied ENTRYPOINT that is annoying to diagnose from a log.
+      - name: Restore executable bit
+        run: chmod +x target/release/slash0-server
+
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      # Runner and image are both arm64, so no buildx or QEMU emulation.
+      - name: Build image
+        run: docker build -t "$IMAGE:latest" -t "$IMAGE:$GITHUB_SHA" .
+
+      # Before the push, so a broken image never reaches the registry. --version
+      # exits before any config load or network call, but still proves the binary
+      # is present, executable, and links against the base image's glibc.
+      - name: Smoke test image
+        run: |
+          docker run --rm --entrypoint /work/slash0-server "$IMAGE:$GITHUB_SHA" --version
+          # The base image has no shell, so confirm the client bundle landed by
+          # listing the filesystem from outside rather than running `test` in it.
+          docker create --name smoke "$IMAGE:$GITHUB_SHA"
+          docker export smoke | tar -t | grep -x 'work/dist/index.html'
+          docker rm smoke
+
+      - name: Push image
+        run: docker push --all-tags "$IMAGE"
+
+  deploy:
+    name: deploy
+    needs: publish
+    if: github.ref == 'refs/heads/master' || startsWith(github.ref, 'refs/heads/ci-test-')
+    runs-on: ubuntu-24.04-arm
+    environment: prod
+    steps:
+      - name: Restart the service
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+          # authorized_keys forces `systemctl --user restart slash0` on the far
+          # end, and the unit's Pull=newer makes that restart fetch :latest.
+          ssh slash0@"$DEPLOY_HOST" true
