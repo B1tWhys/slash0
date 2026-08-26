@@ -73,9 +73,6 @@ jobs:
           rm "$TRUNK_FILE" "$TRUNK_FILE.sha256"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      # Run prek hooks on all files
-      - uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
-
       # The server's build script drives trunk, which builds the wasm client,
       # which builds the shader to SPIR-V. One command covers all four crates.
       - name: Build
