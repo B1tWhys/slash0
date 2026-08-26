@@ -73,20 +73,8 @@ jobs:
           rm "$TRUNK_FILE" "$TRUNK_FILE.sha256"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Format
-        run: |
-          cargo fmt --all --check
-          cargo fmt --manifest-path crates/client/Cargo.toml --all --check
-          cargo fmt --manifest-path crates/shader/Cargo.toml --all --check
-
-      # Everything below runs --release so all three cargo invocations share one
-      # set of artifacts, and so the client sees the same profile trunk builds
-      # it with. Mirrors the prek hooks in .pre-commit-config.yaml.
-      - name: Clippy
-        run: |
-          cargo clippy --workspace --all-targets --release --locked -- -D warnings
-          cargo clippy --manifest-path crates/shader/Cargo.toml --all-targets --release --locked -- -D warnings
-          cargo clippy --manifest-path crates/client/Cargo.toml --all-targets --release --locked -- -D warnings
+      # Run prek hooks on all files
+      - uses: j178/prek-action@4e14d07f9231acabce116ccfca13b13dd9755ece # v3.0.0
 
       # The server's build script drives trunk, which builds the wasm client,
       # which builds the shader to SPIR-V. One command covers all four crates.
