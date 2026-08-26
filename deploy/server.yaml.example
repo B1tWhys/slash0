@@ -1,0 +1,19 @@
+# slash0 server config for the containerized deployment. Copy to
+# /home/slash0/server.yaml on the host; the quadlet unit mounts it read-only at
+# /work/server.yaml, which is where the image's entrypoint looks for it.
+
+server:
+  # Network=host means 127.0.0.1 would only be reachable from the box itself.
+  host: 0.0.0.0
+  port: 3000
+  # In-container path. Baked into the image rather than mounted from the host.
+  assets_dir: /work/dist
+
+logging:
+  filter: "info,slash0=info,tower_http=info"
+
+ris:
+  host: rrc00.ripe.net
+  # If seeding from an MRT dump, keep the file at /home/slash0/<name>.gz on the
+  # host and add a matching read-only Volume= line mounting it under /work.
+  # seed_file: /work/bview.gz
