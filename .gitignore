@@ -5,3 +5,4 @@
 /.claude/settings.local.json
 /.idea/
 *.gz
+/certs

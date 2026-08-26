@@ -6,6 +6,7 @@ mod connection;
 mod http;
 mod route_table;
 mod socket_adapter;
+mod tls;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -36,6 +37,9 @@ struct Cli {
     config: Option<PathBuf>,
 }
 
+/// How long in-flight connections get to finish once a shutdown signal arrives.
+const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -46,21 +50,60 @@ async fn main() -> anyhow::Result<()> {
 
     let route_table = init_route_table(&config).await?;
 
-    let addr = config.server.socket_addr();
-    let app = http::router(&config, metrics_handle, route_table);
+    // Ordered before the routers because the challenge service has to be mounted
+    // on both listeners for Let's Encrypt to validate the order.
+    let acme = config
+        .server
+        .tls_config
+        .as_ref()
+        .map(|tls_config| tls::spawn(&tls_config.lets_encrypt));
 
-    let listener = tokio::net::TcpListener::bind(addr)
-        .await
-        .with_context(|| format!("failed to bind {addr}"))?;
-    info!(%addr, "listening");
+    let app = http::router(
+        &config,
+        metrics_handle,
+        route_table,
+        acme.as_ref().map(|acme| acme.challenge_service.clone()),
+    );
 
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("server error")?;
+    // One handle drains every server it is given to, so both listeners shut down
+    // off the same signal.
+    let handle = axum_server::Handle::new();
+    tokio::spawn({
+        let handle = handle.clone();
+        async move {
+            shutdown_signal().await;
+            handle.graceful_shutdown(Some(SHUTDOWN_GRACE_PERIOD));
+        }
+    });
+
+    let http_addr = config.server.http_socket_addr();
+    info!(%http_addr, "listening");
+    let http_server = axum_server::bind(http_addr).handle(handle.clone()).serve(
+        app.clone()
+            .into_make_service_with_connect_info::<SocketAddr>(),
+    );
+
+    // `axum_server` binds lazily inside the serve future, so a bind failure
+    // surfaces without an address attached. Put them back in the context.
+    match acme {
+        Some(acme) => {
+            let https_addr = config
+                .server
+                .https_socket_addr()
+                .expect("tls_config is Some, so an https address is configured");
+            info!(%https_addr, "listening (tls)");
+            let https_server = axum_server::bind(https_addr)
+                .handle(handle)
+                .acceptor(acme.acceptor)
+                .serve(app.into_make_service_with_connect_info::<SocketAddr>());
+
+            tokio::try_join!(http_server, https_server)
+                .with_context(|| format!("server error (http {http_addr}, https {https_addr})"))?;
+        }
+        None => http_server
+            .await
+            .with_context(|| format!("server error (http {http_addr})"))?,
+    }
 
     Ok(())
 }

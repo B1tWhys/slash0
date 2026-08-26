@@ -4,19 +4,27 @@ After=network-online.target
 
 [Container]
 Image=ghcr.io/b1twhys/slash0:latest
+
 # Pull on every start so the restart CI triggers picks up the new :latest.
 Pull=newer
+
 # Share the host netns: the server binds its port directly, no NAT and no
 # userspace packet forwarder. Matters because the workload is high-rate
 # websocket fanout, and it keeps real client source addresses.
 Network=host
+
 # Host side lives in the slash0 account, container side under /work with the
 # rest of the app. Mount a seed file the same way if one is configured.
 Volume=/home/slash0/server.yaml:/work/server.yaml:ro
+
 # Same path inside and out, so the path in the service config is also the path
 # an operator looks at on the host. See deploy/README.md for why the container
 # has to keep running as UID 0 for this to stay writable.
 Volume=/var/log/slash0:/var/log/slash0:rw
+
+# ACME account key and the issued certificate. Read-write, and outside the image
+# so a deploy does not throw the certificate away and re-order one.
+Volume=/home/slash0/certs:/work/certs:rw
 
 [Service]
 Restart=always

@@ -5,9 +5,27 @@
 server:
   # Network=host means 127.0.0.1 would only be reachable from the box itself.
   host: 0.0.0.0
-  port: 3000
+  # Let's Encrypt only ever validates HTTP-01 on port 80, so the plain-HTTP
+  # listener has to be there. Binding both of these as the rootless `slash0`
+  # user needs the sysctl in deploy/README.md.
+  http_port: 80
   # In-container path. Baked into the image rather than mounted from the host.
   assets_dir: /work/dist
+
+  tls_config:
+    https_port: 443
+    lets_encrypt:
+      domains:
+        - slash0.dev
+      # Bind-mounted from /home/slash0/certs. Holds the ACME account key and the
+      # certificate, and has to persist across restarts: the image is replaced on
+      # every deploy, so anything inside it is re-ordered from scratch.
+      certs_dir: /work/certs
+      # Staging until an order is seen to succeed in `journalctl --user -u slash0`.
+      # Staging certs are untrusted by browsers; flip to true and restart to get a
+      # real one. Production allows only 5 duplicate certificates per week, so it
+      # is a bad place to debug a misconfigured domain.
+      prod_letsencrypt: false
 
 logging:
   filter: "info,slash0=info,tower_http=info"

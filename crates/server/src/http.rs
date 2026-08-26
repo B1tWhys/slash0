@@ -2,6 +2,7 @@ use crate::config::Config;
 use crate::connection::Connection;
 use crate::route_table::RouteTable;
 use crate::socket_adapter::WebSocketAdapter;
+use crate::tls;
 use axum::Json;
 use axum::Router;
 use axum::extract::ws::{WebSocket, WebSocketUpgrade};
@@ -10,6 +11,7 @@ use axum::http::{HeaderMap, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any, get};
 use metrics_exporter_prometheus::PrometheusHandle;
+use rustls_acme::tower::TowerHttp01ChallengeService;
 use serde::Serialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -27,8 +29,9 @@ pub fn router(
     config: &Config,
     metrics_handle: PrometheusHandle,
     route_table: Arc<RouteTable>,
+    acme_challenge: Option<TowerHttp01ChallengeService>,
 ) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/ws", any(ws_handler))
         .with_state(route_table)
         .route(
@@ -38,10 +41,18 @@ pub fn router(
             }),
         )
         .nest("/api", api_router())
-        .fallback_service(ServeDir::new(&config.server.assets_dir))
-        .layer(ServiceBuilder::new().layer(
-            TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(Level::TRACE)),
-        ))
+        .fallback_service(ServeDir::new(&config.server.assets_dir));
+
+    // Let's Encrypt fetches this over plain HTTP during validation, so it is
+    // mounted on both listeners rather than only the TLS one.
+    let router = match acme_challenge {
+        Some(challenge) => router.route_service(tls::HTTP01_CHALLENGE_ROUTE, challenge),
+        None => router,
+    };
+
+    router.layer(ServiceBuilder::new().layer(
+        TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().level(Level::TRACE)),
+    ))
 }
 
 /// API responses are JSON-only. Returning `Json` sets `application/json`;

@@ -7,10 +7,26 @@
 
 server:
   host: 127.0.0.1
-  port: 3000
+  http_port: 3000
   # Directory served for non-API, non-websocket requests. Relative to the
   # working directory (the workspace root under `cargo run`).
   assets_dir: crates/client/dist
+
+  # TLS via Let's Encrypt. Commented out because the defaults above are what a
+  # local `cargo run` uses, and Let's Encrypt cannot validate localhost: it
+  # fetches the challenge over plain HTTP on port 80 at each domain below.
+  # tls_config:
+  #   https_port: 3001
+  #   lets_encrypt:
+  #     domains:
+  #       - slash0.dev
+  #     # Holds the ACME account key and the certificate. Must persist across
+  #     # restarts, or every boot orders a new certificate.
+  #     certs_dir: ./certs
+  #     # The staging directory's rate limits are much harder to hit, at the cost
+  #     # of a certificate browsers do not trust. Flip to true once an order is
+  #     # seen to succeed against staging.
+  #     prod_letsencrypt: false
 
 logging:
   # tracing EnvFilter directive.

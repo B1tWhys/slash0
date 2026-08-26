@@ -13,7 +13,17 @@ is `userdel -r slash0` plus removing the linger file and the log dir.
 
 Requires `podman` 5.0 or newer for quadlet's `Pull=` support.
 
-1. Setup the user/service
+1. Allow the service to bind 80 and 443. Let's Encrypt only validates HTTP-01 on port 80, so this
+   is not optional once TLS is on. `CAP_NET_BIND_SERVICE` is not a substitute: `Network=host`
+   puts the container in the host's network namespace, which is owned by the initial user
+   namespace, so capabilities held inside the container's namespace do not apply to it.
+
+```
+echo 'net.ipv4.ip_unprivileged_port_start=80' > /etc/sysctl.d/99-slash0.conf
+sysctl --system
+```
+
+2. Setup the user/service
 ```
 useradd --system --create-home --home-dir /home/slash0 --shell /bin/bash slash0
 
@@ -27,6 +37,10 @@ install -o slash0 -g slash0 -m 644 server.yaml.example /home/slash0/server.yaml
 # here yet, see Logging below.
 install -d -o slash0 -g slash0 -m 750 /var/log/slash0
 
+# ACME account key and the issued certificate. Mode 700 because both are private
+# keys. Must survive deploys, hence a host dir rather than a path in the image.
+install -d -o slash0 -g slash0 -m 700 /home/slash0/certs
+
 
 install -D -o slash0 -g slash0 -m 644 slash0.container /home/slash0/.config/containers/systemd/slash0.container
 
@@ -34,19 +48,48 @@ systemctl --user daemon-reload
 systemctl --user enable --now slash0
 ```
 
-2. Provision an SSH key and authorize it (make sure you edit `/home/slash0/.ssh/authorized_keys`, not your own auth'd
+3. Provision an SSH key and authorize it (make sure you edit `/home/slash0/.ssh/authorized_keys`, not your own auth'd
    keys). Ideally use `ssh-keygen -t ed25519`. Also it's a good idea to heavily restrict what cmds this user can run:
 
 ```
 command="systemctl --user restart slash0",no-agent-forwarding,no-port-forwarding,no-pty,no-X11-forwarding ssh-ed25519 AAAA...
 ```
 
-3. Configure the repo by adding the secret/value:
+4. Configure the repo by adding the secret/value:
 
 ```bash
 DEPLOY_SSH_KEY=<private key>
 DEPLOY_HOST=slash0.dev
 ```
+
+## TLS
+
+Certificates come from Let's Encrypt over HTTP-01, ordered and renewed in-process by
+`rustls-acme`. There is no certbot, no cron job, and no reload: the running server swaps the
+certificate in itself.
+
+`server.yaml` ships pointing at the **staging** directory, which issues certificates browsers do
+not trust. That is deliberate -- production allows only 5 duplicate certificates per week and 5
+failed validations per hour, which is easy to burn through while a DNS record or a firewall rule
+is still wrong. Watch for a successful order:
+
+```
+journalctl --user -u slash0 -f | grep -i acme
+```
+
+then set `prod_letsencrypt: true` in `/home/slash0/server.yaml` and
+`systemctl --user restart slash0`.
+
+Two things have to be true before an order can succeed:
+
+- Port 80 reachable from the internet at every name in `domains`. Validation is always a plain
+  HTTP fetch of `/.well-known/acme-challenge/<token>` on port 80, regardless of `https_port`.
+- **`host: 0.0.0.0` binds IPv4 only.** If a name in `domains` has an AAAA record, Let's Encrypt
+  will prefer IPv6, get a connection refused, and fail the order with no obvious cause. Either
+  drop the AAAA record or set `host: "::"` (which accepts IPv4 too via v4-mapped addresses).
+
+Deleting `/home/slash0/certs` forces a fresh account and order on next start. Cheap on staging,
+expensive on production.
 
 ## Ops notes
 
