@@ -22,6 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # prost-build shells out to protoc, and it is in the tree because
+      # metrics-exporter-prometheus needs its `protobuf` feature to expose the
+      # native histograms the server registers at startup.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       # No toolchain name here on purpose: rustup reads rust-toolchain.toml,
       # which pins the nightly plus the rustc-dev/llvm-tools/rust-src components
       # that rust-gpu needs to codegen SPIR-V.
