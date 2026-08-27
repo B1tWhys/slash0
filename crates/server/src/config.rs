@@ -55,6 +55,63 @@ pub struct LetsEncryptConfig {
 pub struct LoggingConfig {
     /// `tracing_subscriber::EnvFilter` directive, e.g. `info,slash0=debug`.
     pub filter: String,
+    pub format: LogFormat,
+    /// Kept independent of the sink: colour codes are readable under `less -R`
+    /// too, so writing to a file is not on its own a reason to drop them.
+    pub ansi: bool,
+    /// When set, logs go to rotating files here *instead of* stdout.
+    pub file: Option<FileLoggingConfig>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LogFormat {
+    #[default]
+    Compact,
+    Pretty,
+}
+
+/// Opting in to file logging makes `dir` required, following the same reasoning
+/// as [`TlsConfig`]: a half-written block should fail at startup rather than
+/// quietly write somewhere unexpected. The rest have production-appropriate
+/// defaults, so `file: {dir: /var/log/slash0}` is a complete block.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileLoggingConfig {
+    /// The live log is `<dir>/<prefix>.log`; rotated files get a `.<timestamp>`
+    /// suffix, plus `.gz` once compressed.
+    pub dir: PathBuf,
+    #[serde(default = "default_log_prefix")]
+    pub prefix: String,
+    /// Rotate once the live file grows past this.
+    #[serde(default = "default_max_file_size_mb")]
+    pub max_file_size_mb: u64,
+    /// Rotated files retained before the oldest is deleted. Together with
+    /// `max_file_size_mb` this bounds total disk usage at roughly
+    /// `max_file_size_mb * (max_files + 1)`, and well under it once compression
+    /// applies.
+    #[serde(default = "default_max_log_files")]
+    pub max_files: usize,
+    /// How many of the most recent rotated files to leave uncompressed before
+    /// gzipping the rest -- the newest rotation is usually the one being
+    /// grepped. `null` disables compression entirely.
+    #[serde(default = "default_keep_uncompressed")]
+    pub keep_uncompressed: Option<usize>,
+}
+
+fn default_log_prefix() -> String {
+    "slash0".to_owned()
+}
+
+fn default_max_file_size_mb() -> u64 {
+    64
+}
+
+fn default_max_log_files() -> usize {
+    14
+}
+
+fn default_keep_uncompressed() -> Option<usize> {
+    Some(0)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +157,9 @@ impl Default for LoggingConfig {
     fn default() -> Self {
         Self {
             filter: "info,slash0=debug,tower_http=debug".to_owned(),
+            format: LogFormat::Compact,
+            ansi: true,
+            file: None,
         }
     }
 }
@@ -145,10 +205,27 @@ pub fn load(explicit_path: Option<PathBuf>) -> anyhow::Result<Config> {
 }
 
 fn extract(provider: impl Provider) -> anyhow::Result<Config> {
-    Ok(Figment::new()
+    let config: Config = Figment::new()
         .merge(Serialized::defaults(Config::default()))
         .merge(provider)
-        .extract()?)
+        .extract()?;
+    config.validate()?;
+    Ok(config)
+}
+
+impl Config {
+    /// Catches values that parse but cannot be honoured, so they surface here
+    /// rather than deeper in the code that consumes them.
+    fn validate(&self) -> anyhow::Result<()> {
+        if let Some(file) = &self.logging.file {
+            // `FileRotate` panics outright on a zero-byte rotation limit.
+            anyhow::ensure!(
+                file.max_file_size_mb > 0,
+                "logging.file.max_file_size_mb must be greater than zero"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -224,6 +301,81 @@ mod tests {
     #[test]
     fn tls_block_without_lets_encrypt_is_rejected() {
         load_yaml("server:\n  tls_config:\n    https_port: 443\n").unwrap_err();
+    }
+
+    /// Both files are copied verbatim onto a host, so a typo in either only
+    /// shows up at deploy time otherwise.
+    #[test]
+    fn shipped_example_configs_parse() {
+        let workspace_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+
+        for example in ["config/server.example.yaml", "deploy/server.yaml.example"] {
+            extract(Yaml::file(workspace_root.join(example)))
+                .unwrap_or_else(|err| panic!("{example} failed to parse: {err}"));
+        }
+    }
+
+    #[test]
+    fn logging_defaults_when_block_is_absent() {
+        let logging = load_yaml("").unwrap().logging;
+        assert_eq!(logging.format, LogFormat::Compact);
+        assert!(logging.ansi);
+        assert!(logging.file.is_none());
+    }
+
+    #[test]
+    fn file_logging_needs_only_a_dir() {
+        let file = load_yaml("logging:\n  file:\n    dir: /var/log/slash0\n")
+            .unwrap()
+            .logging
+            .file
+            .expect("file logging is configured");
+
+        assert_eq!(file.dir, PathBuf::from("/var/log/slash0"));
+        assert_eq!(file.prefix, "slash0");
+        assert_eq!(file.max_file_size_mb, 64);
+        assert_eq!(file.max_files, 14);
+        assert_eq!(file.keep_uncompressed, Some(0));
+    }
+
+    #[test]
+    fn file_block_without_dir_is_rejected() {
+        load_yaml("logging:\n  file:\n    prefix: slash0\n").unwrap_err();
+    }
+
+    #[test]
+    fn zero_max_file_size_is_rejected() {
+        // `FileRotate` panics on a zero-byte limit, so this has to fail here.
+        load_yaml("logging:\n  file:\n    dir: /var/log/slash0\n    max_file_size_mb: 0\n")
+            .unwrap_err();
+    }
+
+    #[test]
+    fn keep_uncompressed_round_trips_as_count_and_as_none() {
+        let count =
+            load_yaml("logging:\n  file:\n    dir: /var/log/slash0\n    keep_uncompressed: 3\n")
+                .unwrap();
+        assert_eq!(count.logging.file.unwrap().keep_uncompressed, Some(3));
+
+        let disabled =
+            load_yaml("logging:\n  file:\n    dir: /var/log/slash0\n    keep_uncompressed: null\n")
+                .unwrap();
+        assert_eq!(disabled.logging.file.unwrap().keep_uncompressed, None);
+    }
+
+    #[test]
+    fn log_format_parses_and_rejects_unknown_values() {
+        assert_eq!(
+            load_yaml("logging:\n  format: pretty\n")
+                .unwrap()
+                .logging
+                .format,
+            LogFormat::Pretty
+        );
+        load_yaml("logging:\n  format: json\n").unwrap_err();
     }
 
     #[test]

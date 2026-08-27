@@ -21,7 +21,7 @@ server:
       # certificate, and has to persist across restarts: the image is replaced on
       # every deploy, so anything inside it is re-ordered from scratch.
       certs_dir: /work/certs
-      # Staging until an order is seen to succeed in `journalctl --user -u slash0`.
+      # Staging until an order is seen to succeed in /var/log/slash0/slash0.log.
       # Staging certs are untrusted by browsers; flip to true and restart to get a
       # real one. Production allows only 5 duplicate certificates per week, so it
       # is a bad place to debug a misconfigured domain.
@@ -29,6 +29,15 @@ server:
 
 logging:
   filter: "info,slash0=info,tower_http=info"
+  format: compact
+  ansi: false
+
+  # Bind-mounted from the host at the same path (see deploy/README.md). Setting
+  # this makes files the only sink, so journalctl carries just panics and
+  # startup failures. Rotated files are gzipped; the defaults for the fields
+  # omitted here cap the directory at ~1GB before compression.
+  file:
+    dir: /var/log/slash0
 
 ris:
   host: rrc00.ripe.net

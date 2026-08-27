@@ -33,8 +33,8 @@ loginctl enable-linger slash0
 # Configure the service as needed
 install -o slash0 -g slash0 -m 644 server.yaml.example /home/slash0/server.yaml
 
-# Log dir, bind-mounted into the container by the quadlet unit. Nothing writes
-# here yet, see Logging below.
+# Log dir, bind-mounted into the container by the quadlet unit. This is where
+# the server writes; see Logging below.
 install -d -o slash0 -g slash0 -m 750 /var/log/slash0
 
 # ACME account key and the issued certificate. Mode 700 because both are private
@@ -74,7 +74,7 @@ failed validations per hour, which is easy to burn through while a DNS record or
 is still wrong. Watch for a successful order:
 
 ```
-journalctl --user -u slash0 -f | grep -i acme
+tail -F /var/log/slash0/slash0.log | grep -i acme
 ```
 
 then set `prod_letsencrypt: true` in `/home/slash0/server.yaml` and
@@ -95,6 +95,9 @@ expensive on production.
 
 ```
 systemctl --user status slash0
+tail -F /var/log/slash0/slash0.log
+
+# journalctl only carries panics and startup failures; see Logging below.
 journalctl --user -u slash0 -f
 ```
 
@@ -110,16 +113,25 @@ then `systemctl --user daemon-reload && systemctl --user restart slash0`.
 ### Logging
 
 `/var/log/slash0` is bind-mounted read-write at the same path inside the container, so the server's log files land
-directly in the host dir.
+directly in the host dir. `server.yaml` points `logging.file.dir` at it, and setting that makes files the **only**
+sink: `journalctl` is left with panics and any failure that happens before the logger is up, nothing else. Day-to-day
+tailing is the log file.
 
-One constraint on that: don't switch the image to a `:nonroot` variant. The container runs as UID 0, which rootless
+The live log is always `/var/log/slash0/slash0.log`. It is rotated once it passes `max_file_size_mb`, and the rotated
+copies get a timestamp suffix and are gzipped -- so `tail -F` rather than `tail -f` (to follow across a rotation), and
+`zgrep` rather than `grep` when reaching back into rotated files. Retention is `max_files` rotations, which bounds the
+directory at roughly `max_file_size_mb * (max_files + 1)` before compression; there is no logrotate and no cron job.
+Note that `file-rotate` assumes it is the only thing moving files around in that directory, so do not point an external
+rotator at it.
+
+One constraint on the mount: don't switch the image to a `:nonroot` variant. The container runs as UID 0, which rootless
 podman maps to the host `slash0` user, and that's the only reason files written into the mount come out owned by
 `slash0`. A `:nonroot` image (UID 65532) maps into the subuid range instead and couldn't write to the dir at all.
 
 The image is distroless and has no shell, so `podman exec ... sh` will not work.
 When you need one for debugging, temporarily point the unit at the `:debug` tag
 of the same base by rebuilding against `gcr.io/distroless/cc-debian13:debug`,
-which adds busybox. Day to day, `journalctl` and the `/metrics` endpoint should
+which adds busybox. Day to day, the log file and the `/metrics` endpoint should
 cover it.
 
 If `systemctl --user` over SSH fails with "Failed to connect to bus", the

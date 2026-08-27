@@ -17,15 +17,22 @@ use std::time::Duration;
 use anyhow::Context;
 use bgpkit_parser::BgpkitParser;
 use clap::Parser;
+use file_rotate::compression::Compression;
+use file_rotate::suffix::{AppendTimestamp, FileLimit};
+use file_rotate::{ContentLimit, FileRotate};
 use metrics_exporter_prometheus::{
     Matcher, NativeHistogramConfig, PrometheusBuilder, PrometheusHandle,
 };
 use tokio::signal;
 use tracing::info;
-use tracing_subscriber::EnvFilter;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, Layer};
 
-use crate::config::{Config, LoggingConfig};
+use crate::config::{Config, FileLoggingConfig, LogFormat, LoggingConfig};
 use crate::route_table::RouteTable;
 use ris_client::messages::{BgpMessageType, SubscriptionFilters};
 
@@ -44,7 +51,8 @@ const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(10);
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = config::load(cli.config)?;
-    init_tracing(&config.logging)?;
+    // Held for the whole of main: dropping the guard stops the log writer.
+    let _log_writer_guard = init_tracing(&config.logging)?;
 
     let metrics_handle = setup_prometheus()?;
 
@@ -108,16 +116,69 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing(config: &LoggingConfig) -> anyhow::Result<()> {
+/// Returns the writer guard for the file appender, which must stay alive for as
+/// long as logs are wanted: dropping it shuts the writer thread down and
+/// discards whatever it still had buffered.
+fn init_tracing(config: &LoggingConfig) -> anyhow::Result<Option<WorkerGuard>> {
     let filter = EnvFilter::try_new(&config.filter)
         .with_context(|| format!("invalid log filter directive: {}", config.filter))?;
-    tracing_subscriber::fmt()
-        .pretty()
-        .with_span_events(FmtSpan::CLOSE)
-        .with_env_filter(filter)
+
+    let (writer, guard) = match &config.file {
+        Some(file) => {
+            let (non_blocking, guard) = tracing_appender::non_blocking(open_log_file(file)?);
+            (BoxMakeWriter::new(non_blocking), Some(guard))
+        }
+        None => (BoxMakeWriter::new(std::io::stdout), None),
+    };
+
+    let layer = tracing_subscriber::fmt::layer()
+        .with_writer(writer)
+        .with_ansi(config.ansi)
+        .with_span_events(FmtSpan::CLOSE);
+    // `.compact()` and `.pretty()` produce different types, so the choice has to
+    // be erased to pick between them at runtime.
+    let layer = match config.format {
+        LogFormat::Compact => layer.compact().boxed(),
+        LogFormat::Pretty => layer.pretty().boxed(),
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(layer)
         .try_init()
         .map_err(|err| anyhow::anyhow!("failed to initialize tracing: {err}"))?;
-    Ok(())
+
+    Ok(guard)
+}
+
+/// Opens the rotating log file, failing loudly if the destination is unusable.
+///
+/// The eager `create_dir_all` and probe open are the whole point of this
+/// function: `FileRotate::new` is infallible and only reports a bad destination
+/// when the first write fails, by which time the write is happening on the
+/// appender's own thread where the error is dropped on the floor. Since files
+/// are the only sink once this is configured, that would leave the server
+/// running with no logs at all and nothing to say so.
+fn open_log_file(config: &FileLoggingConfig) -> anyhow::Result<FileRotate<AppendTimestamp>> {
+    std::fs::create_dir_all(&config.dir)
+        .with_context(|| format!("failed to create log directory {}", config.dir.display()))?;
+
+    let path = config.dir.join(format!("{}.log", config.prefix));
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .with_context(|| format!("failed to open log file {}", path.display()))?;
+
+    Ok(FileRotate::new(
+        path,
+        AppendTimestamp::default(FileLimit::MaxFiles(config.max_files)),
+        ContentLimit::BytesSurpassed(config.max_file_size_mb as usize * 1024 * 1024),
+        config
+            .keep_uncompressed
+            .map_or(Compression::None, Compression::OnRotate),
+        None,
+    ))
 }
 
 /// Initialize prometheus metrics recorder + task to periodically run upkeep to avoid memory

@@ -31,6 +31,33 @@ server:
 logging:
   # tracing EnvFilter directive.
   filter: "info,slash0=debug,tower_http=debug"
+  # One line per record (compact) or the multi-line dev format (pretty).
+  format: pretty
+  # Color codes. Independent of the sink -- they are readable under `less -R`,
+  # so writing to a file is not on its own a reason to turn them off.
+  ansi: true
+
+  # Rotating log files. Commented out because a local `cargo run` is easier to
+  # follow on stdout, which is where logs go when this block is absent. Setting
+  # it redirects them: the file becomes the *only* sink, not an addition.
+  # file:
+  #   # Only required field. Created if it does not exist; startup fails if it
+  #   # cannot be written, since otherwise there would be no logs and nothing
+  #   # to say so.
+  #   dir: /var/log/slash0
+  #   # The live log is <dir>/<prefix>.log. Rotated files get a timestamp
+  #   # suffix, so <prefix>.log is always the current one.
+  #   prefix: slash0
+  #   # Rotate once the live file grows past this.
+  #   max_file_size_mb: 64
+  #   # Rotated files kept before the oldest is deleted. With the size limit
+  #   # above this caps disk usage at roughly max_file_size_mb * (max_files + 1)
+  #   # before compression, so ~1GB at these values.
+  #   max_files: 14
+  #   # Most recent rotated files left uncompressed before the rest are gzipped;
+  #   # the newest rotation is usually the one being grepped. null turns
+  #   # compression off entirely.
+  #   keep_uncompressed: 0
 
 ris:
   # RIS Live route collector (RRC) to consume from. Every peer that collector
