@@ -18,7 +18,7 @@ repos:
         entry: cargo clippy --workspace --all-targets -- -D warnings
         language: system
         pass_filenames: false
-        files: ^(crates/(core|server|mrt-util-cli)/.*\.rs|Cargo\.(toml|lock))$
+        files: ^(crates/(core|server|mrt-util-cli|ris_client)/.*\.rs|Cargo\.(toml|lock))$
 
       - id: clippy-shader
         name: cargo clippy (shader)
@@ -33,3 +33,17 @@ repos:
         language: system
         pass_filenames: false
         files: ^crates/client/.*\.(rs|toml)$
+
+      - id: test-workspace
+        name: cargo test (workspace)
+        entry: cargo test --workspace
+        language: system
+        pass_filenames: false
+        files: ^(crates/(core|server|mrt-util-cli|ris_client)/.*|Cargo\.(toml|lock))$
+
+      - id: test-shader
+        name: cargo test (shader)
+        entry: cargo test --manifest-path crates/shader/Cargo.toml
+        language: system
+        pass_filenames: false
+        files: ^crates/shader/.*\.(rs|toml)$
