@@ -4,6 +4,7 @@ use crate::slab::VecSlab;
 use crate::thin::ThinData;
 use crate::timestamp::Timestamp;
 use crate::tree::RadixTree;
+use alloc::vec::Vec;
 
 #[apply(Serde!)]
 #[derive(Debug)]
@@ -16,6 +17,7 @@ pub enum Slash0Message {
         tree: RadixTree<ThinData, VecSlab<Node<ThinData>>>, // TODO: last_bgp_update_id
     },
     ThinBgpUpdate(ThinBgpUpdate),
+    ThinBgpUpdateFrame(Vec<ThinBgpUpdate>),
 }
 
 #[apply(Serde!)]

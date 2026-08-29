@@ -211,7 +211,7 @@ impl BgpUpdate {
         &self,
         ts: Timestamp,
         ip_version: slash0_core::prefix::IpVersion,
-    ) -> Vec<ThinBgpUpdate> {
+    ) -> impl IntoIterator<Item = ThinBgpUpdate> {
         let announced_prefixes = self
             .announcements
             .iter()
@@ -230,9 +230,8 @@ impl BgpUpdate {
             .flat_map(|(prefix, update_type)| {
                 Prefix::parse_cidr(prefix).map(|prefix| (prefix, update_type))
             })
-            .filter(|((version, _), _)| version == &ip_version)
-            .map(|((_, prefix), update_type)| ThinBgpUpdate::new(prefix, ts, update_type))
-            .collect()
+            .filter(move |((version, _), _)| version == &ip_version)
+            .map(move |((_, prefix), update_type)| ThinBgpUpdate::new(prefix, ts, update_type))
     }
 }
 

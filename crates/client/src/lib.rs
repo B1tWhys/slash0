@@ -12,7 +12,7 @@ use slash0_core::prefix::IpVersion;
 use slash0_core::slab::VecSlab;
 use slash0_core::thin::ThinData;
 use slash0_core::tree::RadixTree;
-use slash0_core::wire::{Slash0Message, UpdateType};
+use slash0_core::wire::{Slash0Message, ThinBgpUpdate, UpdateType};
 use std::pin::pin;
 use thiserror::Error;
 use wasm_bindgen::JsValue;
@@ -157,33 +157,30 @@ impl SynchronizingState {
     pub async fn run(mut self) -> Result<ClientState, Slash0Error> {
         loop {
             match receive(&mut self.rx).await {
-                Ok(Some(m)) => match m {
-                    Slash0Message::TrieSnapshot { ip_version, tree } => {
-                        if ip_version != self.ip_version {
-                            warn!(
-                                "Received an {} trie when I expected an {} trie. Ignoring it",
-                                ip_version, self.ip_version
-                            );
-                            continue;
-                        }
-
-                        // Seed the GPU slab buffer from the freshly downloaded
-                        // tree. The per-frame render loop in SubscribedState
-                        // takes over drawing from here.
-                        self.render_state.upload_slab(&tree.slab);
-
-                        return Ok(ClientState::Subscribed(SubscribedState {
-                            render_state: self.render_state,
-                            ip_version,
-                            tx: self.tx,
-                            rx: self.rx,
-                            tree,
-                            updates_since_sweep: 0,
-                        }));
+                Ok(Some(Slash0Message::TrieSnapshot { ip_version, tree })) => {
+                    if ip_version != self.ip_version {
+                        warn!(
+                            "Received an {} trie when I expected an {} trie. Ignoring it",
+                            ip_version, self.ip_version
+                        );
+                        continue;
                     }
-                    Slash0Message::SubscribeRequest { .. } => {}
-                    Slash0Message::ThinBgpUpdate(_) => {}
-                },
+
+                    // Seed the GPU slab buffer from the freshly downloaded
+                    // tree. The per-frame render loop in SubscribedState
+                    // takes over drawing from here.
+                    self.render_state.upload_slab(&tree.slab);
+
+                    return Ok(ClientState::Subscribed(SubscribedState {
+                        render_state: self.render_state,
+                        ip_version,
+                        tx: self.tx,
+                        rx: self.rx,
+                        tree,
+                        updates_since_sweep: 0,
+                    }));
+                }
+                Ok(Some(_)) => {}
                 Ok(None) => {
                     warn!("Connection closed while attempting to sync. Reconnecting...");
                     return Ok(ClientState::Connecting(ConnectingState {
@@ -235,31 +232,20 @@ impl SubscribedState {
             select! {
                 message = recv => match message {
                     Ok(Some(Slash0Message::ThinBgpUpdate(update))) => {
-                        let mut dirty = Vec::new();
-                        let thin_data = ThinData {
-                            // timestamp: update.timestamp, // TODO: Decide if I wanna use the client or server ts
-                            timestamp: now_timestamp()
-                        };
-                        match update.update_type {
-                            UpdateType::ANNOUNCE => {
-                                tree.insert(update.prefix, update.timestamp, thin_data, &mut |idx| {
-                                    dirty.push(idx)
-                                });
-                            }
-                            UpdateType::WITHDRAW => {
-                                tree.withdraw(update.prefix, update.timestamp, &mut |idx| {
-                                    dirty.push(idx)
-                                });
-                            }
-                        }
-
-                        updates_since_sweep += 1;
-                        if updates_since_sweep > 5000 {
-                            tree.sweep_tombstones(&mut |idx| dirty.push(idx));
-                            updates_since_sweep = 0;
-                        }
-
-                        render_state.update(&dirty);
+                        Self::handle_update(
+                            update,
+                            &mut tree,
+                            &mut updates_since_sweep,
+                            &mut render_state
+                        );
+                    }
+                    Ok(Some(Slash0Message::ThinBgpUpdateFrame(updates))) => {
+                        updates.into_iter().for_each(|update| Self::handle_update(
+                            update,
+                            &mut tree,
+                            &mut updates_since_sweep,
+                            &mut render_state
+                        ))
                     }
                     // Anything else on the wire is noise at this point.
                     Ok(Some(_)) => {}
@@ -280,6 +266,37 @@ impl SubscribedState {
                 }
             }
         }
+    }
+
+    fn handle_update(
+        update: ThinBgpUpdate,
+        tree: &mut Tree,
+        updates_since_sweep: &mut usize,
+        render_state: &mut RenderState,
+    ) {
+        let mut dirty = Vec::new();
+        let thin_data = ThinData {
+            // timestamp: update.timestamp, // TODO: Decide if I wanna use the client or server ts
+            timestamp: now_timestamp(),
+        };
+        match update.update_type {
+            UpdateType::ANNOUNCE => {
+                tree.insert(update.prefix, update.timestamp, thin_data, &mut |idx| {
+                    dirty.push(idx)
+                });
+            }
+            UpdateType::WITHDRAW => {
+                tree.withdraw(update.prefix, update.timestamp, &mut |idx| dirty.push(idx));
+            }
+        }
+
+        *updates_since_sweep += 1;
+        if *updates_since_sweep > 5000 {
+            tree.sweep_tombstones(&mut |idx| dirty.push(idx));
+            *updates_since_sweep = 0;
+        }
+
+        render_state.update(&dirty);
     }
 }
 

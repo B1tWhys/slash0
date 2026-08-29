@@ -4,10 +4,13 @@ use ris_client::messages::{RisMessage, RisMessageBody};
 use slash0_core::prefix::IpVersion;
 use slash0_core::timestamp::Timestamp;
 use slash0_core::tree::RadixTree;
-use slash0_core::wire::Slash0Message;
+use slash0_core::wire::{Slash0Message, ThinBgpUpdate};
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::BroadcastStream;
 use tracing::{info, warn};
 
 pub struct ConnectionCtx<Socket: SocketAdapter = WebSocketAdapter> {
@@ -192,30 +195,33 @@ pub struct ActiveState {
 }
 
 impl ActiveState {
-    async fn advance<S: SocketAdapter>(mut self, ctx: &mut ConnectionCtx<S>) -> Connection {
+    async fn advance<S: SocketAdapter>(self, ctx: &mut ConnectionCtx<S>) -> Connection {
+        let stream = BroadcastStream::new(self.message_stream);
+        let chunked_stream = stream.chunks_timeout(512, Duration::from_millis(16));
+        tokio::pin!(chunked_stream);
+
         loop {
             tokio::select! {
-                update = self.message_stream.recv() => {
-                    let update = update.expect("TODO: why can this fail? Handle it better, ig");
-                    self.send_update(update, ctx).await;
+                Some(ris_chunk) = chunked_stream.next() => {
+                    let chunk = ris_chunk.iter().flatten();
+                    let msg = ris_chunk_to_slash0_framed_msg(self.ip_version, chunk);
+                    if let Err(e) = ctx.socket.send(&msg).await {
+                        warn!(%e, "Failed to send message, closing connection");
+                        return Connection::Closing;
+                    }
                 }
                 received = ctx.socket.next() => {
                     match received {
-                        Ok(Some(message)) => {
-                            match message {
-                                Slash0Message::SubscribeRequest{ip_version  } => {
-                                    if self.ip_version != ip_version {
-                                        return Connection::Synchronizing(SynchronizingState { ip_version})
-                                    }
-                                }
-                                Slash0Message::TrieSnapshot{ .. } => {}
-                                Slash0Message::ThinBgpUpdate(_) => {}
+                        Ok(Some(Slash0Message::SubscribeRequest { ip_version })) => {
+                            if self.ip_version != ip_version {
+                                return Connection::Synchronizing(SynchronizingState { ip_version })
                             }
-                        }
+                        },
+                        Ok(Some(_)) => {},
                         Ok(None) => {
                             info!("Connection closed");
                             return Connection::Closing;
-                        }
+                        },
                         Err(e) => {
                             info!(%e, "Error received, closing connection");
                             return Connection::Closing;
@@ -225,26 +231,29 @@ impl ActiveState {
             }
         }
     }
+}
 
-    async fn send_update<S: SocketAdapter>(
-        &mut self,
-        update: RisMessage,
-        ctx: &mut ConnectionCtx<S>,
-    ) {
-        let timestamp = Timestamp::from_sec(update.timestamp);
+fn ris_chunk_to_slash0_framed_msg<'a>(
+    ip_version: IpVersion,
+    ris_chunk: impl Iterator<Item = &'a RisMessage>,
+) -> Slash0Message {
+    let body = ris_chunk
+        .flat_map(|m| ris_message_to_slash0_messages(ip_version, m))
+        .flatten()
+        .collect::<Vec<_>>();
+    Slash0Message::ThinBgpUpdateFrame(body)
+}
 
-        let thin_updates = match update.body {
-            RisMessageBody::Update(bgp_update) => {
-                bgp_update.to_thin_updates(timestamp, self.ip_version)
-            }
-            _ => return,
-        };
+fn ris_message_to_slash0_messages(
+    ip_version: IpVersion,
+    update: &RisMessage,
+) -> Option<impl IntoIterator<Item = ThinBgpUpdate>> {
+    let timestamp = Timestamp::from_sec(update.timestamp);
 
-        for update in thin_updates {
-            ctx.socket
-                .send(&Slash0Message::ThinBgpUpdate(update))
-                .await
-                .expect("TODO: Handle this better");
+    match update.body {
+        RisMessageBody::Update(ref bgp_update) => {
+            Some(bgp_update.to_thin_updates(timestamp, ip_version))
         }
+        _ => None,
     }
 }
