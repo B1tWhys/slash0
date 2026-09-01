@@ -18,6 +18,8 @@ pub trait Slab<T>: SlabRead<T> {
     fn size_capacity(&self) -> usize;
     /// Bytes actually being used by nodes in the vec
     fn size(&self) -> usize;
+    /// Get if the index is valid/not freed
+    fn try_get(&self, idx: NodeIdx) -> Option<&T>;
 }
 
 #[cfg(feature = "alloc")]
@@ -101,6 +103,7 @@ mod vec_backed {
         fn get(&self, idx: NodeIdx) -> &T {
             &self.entries[idx.get() as usize]
         }
+
         fn len(&self) -> u32 {
             // `entries` carries the reserved zero slot and never shrinks, so the
             // live count is the backing length minus that slot and everything
@@ -139,6 +142,17 @@ mod vec_backed {
         }
         fn size(&self) -> usize {
             size_of::<T>() * self.entries.len()
+        }
+
+        fn try_get(&self, idx: NodeIdx) -> Option<&T> {
+            // Linear search is eww, but the free list shouldn't be that big typically
+            // and I think fast push/pop operations are much more important so I don't wanna make
+            // it a HashSet anyway. Can revisit later
+            if self.free_list.contains(&idx) || idx.get() as usize > self.size() {
+                return None;
+            };
+
+            self.entries.get(idx.get() as usize)
         }
     }
 

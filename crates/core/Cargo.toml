@@ -11,7 +11,7 @@ serde = ["dep:serde", "bitflags/serde"]
 # CPU-side support for uploading the shader-visible structs to the GPU. Off by
 # default so the shader itself (default-features = false) doesn't pull it in.
 gpu = ["dep:bytemuck", "bitflags/bytemuck"]
-# CIDR-string parsing on the CPU. Pulls in a data-carrying error enum that
+# CIDR-string/ip address parsing on the CPU. Pulls in a data-carrying error enum that
 # rust-gpu can't lower, so the shader (default-features = false) leaves it off.
 parse = ["dep:thiserror"]
 
@@ -27,3 +27,4 @@ hashbrown = { version = "0.17.1", optional = true }
 macro_rules_attribute = "0.2.3"
 serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 thiserror = { version = "2.0.19", default-features = false, optional = true }
+log = "0.4.33"

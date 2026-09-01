@@ -19,6 +19,7 @@ use tower::ServiceBuilder;
 use tower_http::services::ServeDir;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::{Level, info};
+use crate::api::api_router;
 
 /// `ServeDir` is itself a `Service`, so it drops straight into
 /// `fallback_service` with no `any_service` wrapper. The API lives under a
@@ -33,7 +34,6 @@ pub fn router(
 ) -> Router {
     let router = Router::new()
         .route("/ws", any(ws_handler))
-        .with_state(route_table)
         .route(
             "/metrics",
             get(async move |header_map: HeaderMap| {
@@ -41,6 +41,7 @@ pub fn router(
             }),
         )
         .nest("/api", api_router())
+        .with_state(Arc::clone(&route_table))
         .fallback_service(ServeDir::new(&config.server.assets_dir));
 
     // Let's Encrypt fetches this over plain HTTP during validation, so it is
@@ -55,21 +56,6 @@ pub fn router(
     ))
 }
 
-/// API responses are JSON-only. Returning `Json` sets `application/json`;
-/// once endpoints take bodies, the `Json<T>` extractor rejects the wrong
-/// request `Content-Type` with 415 on its own.
-fn api_router() -> Router {
-    Router::new().route("/health", get(health))
-}
-
-#[derive(Serialize)]
-struct Health {
-    status: &'static str,
-}
-
-async fn health() -> Json<Health> {
-    Json(Health { status: "ok" })
-}
 
 async fn ws_handler(
     upgrade: WebSocketUpgrade,

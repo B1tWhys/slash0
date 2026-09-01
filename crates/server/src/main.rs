@@ -6,6 +6,7 @@ mod connection;
 mod http;
 mod route_table;
 mod socket_adapter;
+mod api;
 mod tls;
 
 use std::net::SocketAddr;

@@ -6,7 +6,7 @@ build = "build.rs"
 
 [dependencies]
 anyhow = "1.0.104"
-axum = { version = "0.8.9", features = ["tokio", "ws"] }
+axum = { version = "0.8.9", features = ["macros", "tokio", "ws"] }
 bgpkit-parser = { version = "0.18.0", default-features = false, features = ["parser"] }
 clap = { version = "4.6.4", features = ["derive"] }
 file-rotate = "0.8.0"

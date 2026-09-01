@@ -1,14 +1,15 @@
 use bgpkit_parser::models::ElemType;
 use bgpkit_parser::{BgpkitParser, Filter};
 use ipnet::IpNet;
-use slash0_core::node::Node;
-use slash0_core::prefix::{IpVersion, Prefix};
-use slash0_core::slab::{Slab, VecSlab};
+use slash0_core::node::{Node, NodeData, NodeIdx};
+use slash0_core::prefix::{Address, IpVersion, Prefix};
+use slash0_core::slab::{Slab, SlabRead, VecSlab};
 use slash0_core::thick::ThickData;
 use slash0_core::timestamp::Timestamp;
 use slash0_core::tree::RadixTree;
 use std::collections::HashMap;
 use std::io::Read;
+use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 use tracing::{Level, field, info, info_span, instrument, span, warn};
@@ -54,6 +55,8 @@ impl RouteTable {
         }
     }
 
+
+
     /// Builds a route table and spawns a background task that ingests `receiver`
     /// until the RIS stream closes. The returned handle can be cloned freely and
     /// used to [`subscribe`](Self::subscribe); the ingest task holds its own
@@ -65,6 +68,8 @@ impl RouteTable {
         table
     }
 
+    /// Bulk inserts all the routes from a bgpkit parser. These are not sent (or queued) on
+    /// the `updates` broadcast (they just populate the trees)
     #[instrument(skip_all)]
     pub fn add_routes_from(&self, bgpkit_parser: BgpkitParser<impl Read>) {
         let mut v4_routes = HashMap::new();
@@ -139,6 +144,32 @@ impl RouteTable {
             IpVersion::V4 => &self.v4,
             IpVersion::V6 => &self.v6,
         }
+    }
+
+    pub fn lookup(
+        &self,
+        addr: Address,
+        ip_version: IpVersion,
+    ) -> Option<(NodeIdx, Node<ThickData>)> {
+        let tree = self.tree_for(ip_version).lock().unwrap();
+        tree.lookup(addr).map(|i| (i, tree.slab.get(i).clone()))
+    }
+
+    pub fn get_node(
+        &self,
+        version: IpVersion,
+        node_idx: NodeIdx
+    ) -> Option<Node<ThickData>> {
+        let tree = self.tree_for(version).lock().unwrap();
+        tree.slab.try_get(node_idx).cloned()
+    }
+
+    pub fn get_root(
+        &self,
+        version: IpVersion
+    ) -> Option<Node<ThickData>> {
+        let tree = self.tree_for(version).lock().unwrap();
+        tree.root().and_then(|i| tree.slab.try_get(i)).cloned()
     }
 
     /// Publishes the per-family trie tallies to the metrics recorder. Each trie

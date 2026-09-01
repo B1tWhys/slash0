@@ -8,6 +8,7 @@ use slash0_core::node::{Node, NodeIdx};
 use slash0_core::prefix::{Address, IpVersion};
 use slash0_core::thick::ThickData;
 use std::sync::Arc;
+use tracing::info;
 
 /// API responses are JSON-only
 pub fn api_router() -> Router<Arc<RouteTable>> {
@@ -87,8 +88,25 @@ async fn get_root(
     State(route_table): State<Arc<RouteTable>>,
     Path(query): Path<GetRootRequest>,
 ) -> Result<Json<GetNodeResult>, (StatusCode, String)> {
+    info!(%query.ip_version, "get_root");
     match route_table.get_root(query.ip_version) {
         None => Err((StatusCode::NOT_FOUND, "That tree is empty".to_string())),
         Some(node) => Ok(Json(GetNodeResult { node })),
     }
 }
+
+// #[derive(Debug, Deserialize)]
+// struct QueryPrefixRequest {
+//     q: String,
+// }
+//
+// #[derive(Debug, Serialize)]
+// struct QueryPrefixResponse {}
+//
+// #[axum::debug_handler]
+// async fn query_prefix(
+//     State(route_table): State<Arc<RouteTable>>,
+//     Query(query): Query<QueryPrefixRequest>,
+// ) -> Result<Json<QueryPrefixResponse>, (StatusCode, String)> {
+//
+// }
