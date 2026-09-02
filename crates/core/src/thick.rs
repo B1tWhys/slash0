@@ -1,11 +1,27 @@
+use alloc::string::String;
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
 use crate::node::NodeData;
 use crate::thin::ThinData;
 use crate::timestamp::Timestamp;
 
 #[apply(Serde!)]
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct ThickData {
     pub timestamp: Timestamp,
+    pub path: Vec<u32>,
+    pub origin: ThickOrigin,
+    pub host: String,
+
+}
+
+#[apply(Serde!)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum ThickOrigin {
+    Igp,
+    Egp,
+    #[default]
+    Incomplete
 }
 
 impl NodeData for ThickData {
