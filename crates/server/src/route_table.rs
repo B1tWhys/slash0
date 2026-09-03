@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
-use tracing::{Level, field, info, info_span, instrument, span, warn};
+use tracing::{info, info_span, instrument, warn};
 
 use ris_client::messages::{RisMessage, RisMessageBody};
 
@@ -175,21 +175,21 @@ impl RouteTable {
     ///
     /// [`subscribe`]: RouteTable::subscribe
     pub fn sweep(&self) {
-        for (version, ip_version) in [(IpVersion::V4, "v4"), (IpVersion::V6, "v6")] {
-            let span = span!(
-                Level::DEBUG,
-                "sweep_tombstones",
-                ip_version,
-                reclaimed = field::Empty
-            );
-            let _guard = span.enter();
+        for (version, _ip_version) in [(IpVersion::V4, "v4"), (IpVersion::V6, "v6")] {
+            // let span = span!(
+            //     Level::DEBUG,
+            //     "sweep_tombstones",
+            //     ip_version,
+            //     reclaimed = field::Empty
+            // );
+            // let _guard = span.enter();
             let mut tree = self
                 .tree_for(version)
                 .lock()
                 .expect("route table mutex poisoned");
-            let before = tree.node_count();
+            let _before = tree.node_count();
             tree.sweep_tombstones(&mut |_| {});
-            span.record("reclaimed", before - tree.node_count());
+            // span.record("reclaimed", before - tree.node_count());
         }
     }
 

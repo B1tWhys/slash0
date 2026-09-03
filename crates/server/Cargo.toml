@@ -31,3 +31,4 @@ mime = "0.3.17"
 rustls-acme = { version = "0.15.4", features = ["axum", "tower"] }
 axum-server = "0.8.0"
 tokio-stream = { version = "0.1.19", features = ["sync", "time"] }
+tokio-util = "0.7.19"

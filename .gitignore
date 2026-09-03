@@ -6,3 +6,10 @@
 /.idea/
 *.gz
 /certs
+*bview
+afk_logs
+data
+grafana_storage/
+prometheus.yml
+run_grafana.sh
+config/server.test.yaml

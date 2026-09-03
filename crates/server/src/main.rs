@@ -24,6 +24,7 @@ use metrics_exporter_prometheus::{
     Matcher, NativeHistogramConfig, PrometheusBuilder, PrometheusHandle,
 };
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tracing::info;
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::fmt::format::FmtSpan;
@@ -56,7 +57,9 @@ async fn main() -> anyhow::Result<()> {
 
     let metrics_handle = setup_prometheus()?;
 
-    let route_table = init_route_table(&config).await?;
+    let shutdown_signal = shutdown_signal();
+
+    let route_table = init_route_table(&config, shutdown_signal.clone()).await?;
 
     // Ordered before the routers because the challenge service has to be mounted
     // on both listeners for Let's Encrypt to validate the order.
@@ -77,9 +80,10 @@ async fn main() -> anyhow::Result<()> {
     // off the same signal.
     let handle = axum_server::Handle::new();
     tokio::spawn({
+        let axum_shutdown_signal = shutdown_signal.clone();
         let handle = handle.clone();
         async move {
-            shutdown_signal().await;
+            axum_shutdown_signal.cancelled().await;
             handle.graceful_shutdown(Some(SHUTDOWN_GRACE_PERIOD));
         }
     });
@@ -207,7 +211,17 @@ fn setup_prometheus() -> anyhow::Result<PrometheusHandle> {
 }
 
 /// Create a route table, bootstrapped with data and subscribed to RIS-live to stay up to date
-async fn init_route_table(config: &Config) -> anyhow::Result<Arc<RouteTable>> {
+async fn init_route_table(
+    config: &Config,
+    shutdown_signal: CancellationToken,
+) -> anyhow::Result<Arc<RouteTable>> {
+    // TODO: Rewrite this. The main point was to just have some data quickly populated for testing, but
+    // this is clearly not working. I think I'm getting some of the wrong types of MRT messages mixed
+    // in, and somehow I'm coincidentally ending up with identical numbers of IPv4 & IPv6 routes
+    // being ingested, which I just don't believe is right.
+    //
+    // Also this code feels slower than it should be.
+    // TODO: Maybe try memmap'ing the file in with
     let ris = if let Some(ref mock_ris_config) = config.ris.mock_stream_config {
         let path = PathBuf::from_str(&mock_ris_config.mock_events_file).with_context(|| {
             format!(
@@ -217,11 +231,14 @@ async fn init_route_table(config: &Config) -> anyhow::Result<Arc<RouteTable>> {
         })?;
         ris_client::mock_event_source::subscribe_from_file(&path, true).await?
     } else {
-        ris_client::stream::subscribe(SubscriptionFilters {
-            host: Some(config.ris.host.clone()),
-            message_type: Some(BgpMessageType::Update),
-            ..Default::default()
-        })
+        ris_client::stream::subscribe(
+            SubscriptionFilters {
+                host: Some(config.ris.host.clone()),
+                message_type: Some(BgpMessageType::Update),
+                ..Default::default()
+            },
+            shutdown_signal,
+        )
         .await
         .with_context(|| format!("failed to subscribe to RIS Live host {}", config.ris.host))?
     };
@@ -252,24 +269,33 @@ async fn init_route_table(config: &Config) -> anyhow::Result<Arc<RouteTable>> {
     Ok(route_table)
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        signal::ctrl_c()
-            .await
-            .expect("failed to install Ctrl+C handler");
-    };
+fn shutdown_signal() -> CancellationToken {
+    let ret = CancellationToken::new();
 
-    let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .expect("failed to install SIGTERM handler")
-            .recv()
-            .await;
-    };
+    let cancellation_token = ret.clone();
+    tokio::spawn(async move {
+        let ctrl_c = async {
+            signal::ctrl_c()
+                .await
+                .expect("failed to install Ctrl+C handler");
+        };
 
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = terminate => {},
-    }
+        let terminate = async {
+            signal::unix::signal(signal::unix::SignalKind::terminate())
+                .expect("failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
 
-    info!("shutdown signal received, draining connections");
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+
+        info!("Shutdown received, firing cancellation token!");
+
+        cancellation_token.cancel();
+    });
+
+    ret
 }
